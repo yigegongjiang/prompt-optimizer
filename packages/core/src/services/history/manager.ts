@@ -12,7 +12,7 @@ import { ImportExportError } from '../../interfaces/import-export';
  */
 export class HistoryManager implements IHistoryManager {
   private readonly storageKey = CORE_SERVICE_KEYS.PROMPT_HISTORY;
-  private readonly maxRecords = 50; // Maximum 50 records
+  private readonly maxRecords = 500; // Maximum 500 records
   private readonly storage: StorageAdapter;
   private readonly modelManager: IModelManager;
 
