@@ -4,7 +4,7 @@ import { ModelManager } from '../model/manager';
 import { APIError, RequestConfigError } from './errors';
 import OpenAI from 'openai';
 import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
-import { isVercel, isDocker, getProxyUrl, isRunningInElectron } from '../../utils/environment';
+import { isRunningInElectron } from '../../utils/environment';
 import { ElectronLLMProxy } from './electron-proxy';
 
 /**
@@ -58,7 +58,7 @@ export class LLMService implements ILLMService {
   /**
    * 获取OpenAI实例
    */
-  private getOpenAIInstance(modelConfig: ModelConfig, isStream: boolean = false): OpenAI {
+  private getOpenAIInstance(modelConfig: ModelConfig, _isStream: boolean = false): OpenAI {
 
     const apiKey = modelConfig.apiKey || '';
 
@@ -68,29 +68,17 @@ export class LLMService implements ILLMService {
       processedBaseURL = processedBaseURL.slice(0, -'/chat/completions'.length);
     }
 
-    // 使用代理处理跨域问题
-    let finalBaseURL = processedBaseURL;
-    if (processedBaseURL) {
-      if (modelConfig.useVercelProxy === true && isVercel()) {
-        finalBaseURL = getProxyUrl(processedBaseURL, isStream);
-        console.log(`使用Vercel${isStream ? '流式' : ''}API代理:`, finalBaseURL);
-      } else if (modelConfig.useDockerProxy === true && isDocker()) {
-        finalBaseURL = getProxyUrl(processedBaseURL, isStream);
-        console.log(`使用Docker${isStream ? '流式' : ''}API代理:`, finalBaseURL);
-      }
-    }
-
     // 创建OpenAI实例配置
-    const defaultTimeout = isStream ? 90000 : 60000;
+    const defaultTimeout = _isStream ? 90000 : 60000;
     const timeout = modelConfig.llmParams?.timeout !== undefined
                     ? modelConfig.llmParams.timeout
                     : defaultTimeout;
-    
+
     const config: any = {
       apiKey: apiKey,
-      baseURL: finalBaseURL,
+      baseURL: processedBaseURL,
       timeout: timeout,
-      maxRetries: isStream ? 2 : 3
+      maxRetries: _isStream ? 2 : 3
     };
 
     // In any browser-like environment, we must set this flag to true 
@@ -108,7 +96,7 @@ export class LLMService implements ILLMService {
   /**
    * 获取Gemini实例
    */
-  private getGeminiModel(modelConfig: ModelConfig, systemInstruction?: string, isStream: boolean = false): GenerativeModel {
+  private getGeminiModel(modelConfig: ModelConfig, systemInstruction?: string, _isStream: boolean = false): GenerativeModel {
     const apiKey = modelConfig.apiKey || '';
 
     // 创建GoogleGenerativeAI实例 - 旧版本直接传入字符串API key
@@ -129,18 +117,7 @@ export class LLMService implements ILLMService {
     if (processedBaseURL?.endsWith('/v1beta')) {
       processedBaseURL = processedBaseURL.slice(0, -'/v1beta'.length);
     }
-    // 使用代理处理跨域问题
-    let finalBaseURL = processedBaseURL;
-    if (processedBaseURL) {
-      if (modelConfig.useVercelProxy === true && isVercel()) {
-        finalBaseURL = getProxyUrl(processedBaseURL, isStream);
-        console.log(`使用Vercel${isStream ? '流式' : ''}API代理:`, finalBaseURL);
-      } else if (modelConfig.useDockerProxy === true && isDocker()) {
-        finalBaseURL = getProxyUrl(processedBaseURL, isStream);
-        console.log(`使用Docker${isStream ? '流式' : ''}API代理:`, finalBaseURL);
-      }
-    }
-    return genAI.getGenerativeModel(modelOptions, { "baseUrl": finalBaseURL });
+    return genAI.getGenerativeModel(modelOptions, { "baseUrl": processedBaseURL });
   }
 
   /**
@@ -571,23 +548,20 @@ export class LLMService implements ILLMService {
         const reasoningContent = chunk.choices[0]?.delta?.reasoning_content || '';
         if (reasoningContent) {
           accumulatedReasoning += reasoningContent;
-          
+
           // 如果有推理回调，发送推理内容
           if (callbacks.onReasoningToken) {
             callbacks.onReasoningToken(reasoningContent);
           }
-          await new Promise(resolve => setTimeout(resolve, 10));
         }
 
         // 处理主要内容
         const content = chunk.choices[0]?.delta?.content || '';
         if (content) {
           accumulatedContent += content;
-          
+
           // 使用流式think标签处理
           this.processStreamContentWithThinkTags(content, callbacks, thinkState);
-          
-          await new Promise(resolve => setTimeout(resolve, 10));
         }
       }
 
@@ -664,7 +638,6 @@ export class LLMService implements ILLMService {
           if (callbacks.onReasoningToken) {
             callbacks.onReasoningToken(reasoningContent);
           }
-          await new Promise(resolve => setTimeout(resolve, 10));
         }
 
         // 🆕 处理工具调用
@@ -675,9 +648,9 @@ export class LLMService implements ILLMService {
               while (toolCalls.length <= toolCallDelta.index) {
                 toolCalls.push({ id: '', type: 'function' as const, function: { name: '', arguments: '' } });
               }
-              
+
               const currentToolCall = toolCalls[toolCallDelta.index];
-              
+
               if (toolCallDelta.id) currentToolCall.id = toolCallDelta.id;
               if (toolCallDelta.type) currentToolCall.type = toolCallDelta.type;
               if (toolCallDelta.function) {
@@ -687,9 +660,9 @@ export class LLMService implements ILLMService {
                 if (toolCallDelta.function.arguments) {
                   currentToolCall.function.arguments += toolCallDelta.function.arguments;
                 }
-                
+
                 // 当工具调用完整时，通知回调
-                if (currentToolCall.id && currentToolCall.function.name && 
+                if (currentToolCall.id && currentToolCall.function.name &&
                     toolCallDelta.function.arguments && callbacks.onToolCall) {
                   try {
                     JSON.parse(currentToolCall.function.arguments);
@@ -708,7 +681,6 @@ export class LLMService implements ILLMService {
         if (content) {
           accumulatedContent += content;
           this.processStreamContentWithThinkTags(content, callbacks, thinkState);
-          await new Promise(resolve => setTimeout(resolve, 10));
         }
       }
 
@@ -792,8 +764,6 @@ export class LLMService implements ILLMService {
         if (text) {
           accumulatedContent += text;
           callbacks.onToken(text);
-          // 添加小延迟，让UI有时间更新
-          await new Promise(resolve => setTimeout(resolve, 10));
         }
       }
 
@@ -888,8 +858,6 @@ export class LLMService implements ILLMService {
         if (text) {
           accumulatedContent += text;
           callbacks.onToken(text);
-          // 添加小延迟，让UI有时间更新
-          await new Promise(resolve => setTimeout(resolve, 10));
         }
 
         // 处理工具调用
@@ -904,9 +872,9 @@ export class LLMService implements ILLMService {
                 arguments: JSON.stringify(functionCall.args)
               }
             };
-            
+
             toolCalls.push(toolCall);
-            
+
             console.log('[Gemini] Tool call received:', toolCall);
             if (callbacks.onToolCall) {
               callbacks.onToolCall(toolCall);

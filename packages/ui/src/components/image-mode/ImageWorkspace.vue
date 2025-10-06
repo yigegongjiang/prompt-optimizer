@@ -105,16 +105,24 @@
             <NGridItem :span="12" :xs="24" :sm="12">
               <NSpace vertical :size="8">
                 <NText :depth="2" style="font-size: 14px; font-weight: 500;">{{ t('imageWorkspace.input.optimizeTemplate') }}</NText>
-                <TemplateSelectUI
-                  v-if="services && services.templateManager"
-                  v-model="selectedTemplate"
-                  :type="templateType"
-                  optimization-mode="user"
-                  :placeholder="t('imageWorkspace.input.templatePlaceholder')"
-                  size="medium"
-                  :disabled="isOptimizing"
-                  @update:model-value="saveSelections"
-                />
+                <template v-if="services && services.templateManager">
+                  <SelectWithConfig
+                    v-model="selectedTemplateIdForSelect"
+                    :options="templateOptions as any"
+                    :getPrimary="OptionAccessors.getPrimary"
+                    :getSecondary="OptionAccessors.getSecondary"
+                    :getValue="OptionAccessors.getValue"
+                    :placeholder="t('imageWorkspace.input.templatePlaceholder')"
+                    size="medium"
+                    :disabled="isOptimizing"
+                    filterable
+                    :show-config-action="true"
+                    :show-empty-config-c-t-a="true"
+                    @focus="handleTemplateSelectFocus"
+                    @update:modelValue="saveSelections"
+                    @config="() => appOpenTemplateManager && appOpenTemplateManager(templateType as any)"
+                  />
+                </template>
                 <NText v-else depth="3" style="padding: 0; font-size: 14px;">
                   {{ t('common.loading') }}
                 </NText>
@@ -125,14 +133,39 @@
             <NGridItem :span="8" :xs="24" :sm="8">
               <NSpace vertical :size="8">
                 <NText :depth="2" style="font-size: 14px; font-weight: 500;">{{ t('imageWorkspace.input.textModel') }}</NText>
-                <NSelect
-                  :options="textModelOptions"
-                  v-model:value="selectedTextModelKey"
-                  :placeholder="t('imageWorkspace.input.modelPlaceholder')"
-                  size="medium"
-                  :disabled="isOptimizing"
-                  @update:value="saveSelections"
-                />
+                <template v-if="appOpenModelManager">
+                  <SelectWithConfig
+                    v-model="selectedTextModelKey"
+                    :options="textModelOptions as any"
+                    :getPrimary="OptionAccessors.getPrimary"
+                    :getSecondary="OptionAccessors.getSecondary"
+                    :getValue="OptionAccessors.getValue"
+                    :placeholder="t('imageWorkspace.input.modelPlaceholder')"
+                    size="medium"
+                    :disabled="isOptimizing"
+                    filterable
+                    :show-config-action="true"
+                    :show-empty-config-c-t-a="true"
+                    @focus="handleTextModelSelectFocus"
+                    @update:modelValue="saveSelections"
+                    @config="() => appOpenModelManager && appOpenModelManager('text')"
+                  />
+                </template>
+                <template v-else>
+                  <SelectWithConfig
+                    v-model="selectedTextModelKey"
+                    :options="textModelOptions as any"
+                    :getPrimary="OptionAccessors.getPrimary"
+                    :getSecondary="OptionAccessors.getSecondary"
+                    :getValue="OptionAccessors.getValue"
+                    :placeholder="t('imageWorkspace.input.modelPlaceholder')"
+                    size="medium"
+                    :disabled="isOptimizing"
+                    filterable
+                    @focus="handleTextModelSelectFocus"
+                    @update:modelValue="saveSelections"
+                  />
+                </template>
               </NSpace>
             </NGridItem>
 
@@ -196,14 +229,37 @@
           <n-form label-placement="left" size="medium">
             <n-form-item :label="t('imageWorkspace.generation.imageModel')">
               <n-space align="center" :size="12">
-                <n-select
-                  :options="imageModelOptions"
-                  v-model:value="selectedImageModelKey"
-                  :placeholder="t('imageWorkspace.generation.imageModelPlaceholder')"
-                  style="min-width: 200px; max-width: 100%;"
-                  :disabled="isGenerating"
-                  @update:value="saveSelections"
-                />
+                <template v-if="appOpenModelManager">
+                  <SelectWithConfig
+                    v-model="selectedImageModelKey"
+                    :options="imageModelOptions as any"
+                    :getPrimary="OptionAccessors.getPrimary"
+                    :getSecondary="OptionAccessors.getSecondary"
+                    :getValue="OptionAccessors.getValue"
+                    :placeholder="t('imageWorkspace.generation.imageModelPlaceholder')"
+                    style="min-width: 200px; max-width: 100%;"
+                    :disabled="isGenerating"
+                    filterable
+                    @update:modelValue="saveSelections"
+                    @config="() => appOpenModelManager && appOpenModelManager('image')"
+                    :show-config-action="true"
+                    :show-empty-config-c-t-a="true"
+                  />
+                </template>
+                <template v-else>
+                  <SelectWithConfig
+                    v-model="selectedImageModelKey"
+                    :options="imageModelOptions as any"
+                    :getPrimary="OptionAccessors.getPrimary"
+                    :getSecondary="OptionAccessors.getSecondary"
+                    :getValue="OptionAccessors.getValue"
+                    :placeholder="t('imageWorkspace.generation.imageModelPlaceholder')"
+                    style="min-width: 200px; max-width: 100%;"
+                    :disabled="isGenerating"
+                    filterable
+                    @update:modelValue="saveSelections"
+                  />
+                </template>
                 <!-- 当前选中模型的Provider、Model和能力标签 -->
                 <n-space v-if="selectedImageModelInfo || selectedImageModelCapabilities" :size="6" :wrap="true">
                   <!-- Provider和Model标签 -->
@@ -528,7 +584,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, inject, ref, computed, type Ref } from 'vue'
+import { onMounted, onUnmounted, inject, ref, computed, watch, nextTick, type Ref } from 'vue'
 import {
   NCard, NButton, NInput, NSelect, NEmpty, NFormItem, NForm, NSpace,
   NUpload, NUploadDragger, NImage, NText, NSwitch, NFlex, NGrid, NGridItem,
@@ -536,14 +592,17 @@ import {
 } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 // 使用 Naive UI 内置图标或简单文本替代
-import TemplateSelectUI from '../TemplateSelect.vue'
+// import TemplateSelectUI from '../TemplateSelect.vue' // Replaced by SelectWithConfig
 import PromptPanelUI from '../PromptPanel.vue'
 import TestResultSection from '../TestResultSection.vue'
+import SelectWithConfig from '../SelectWithConfig.vue'
 import ImageModeSelector, { type ImageMode } from './ImageModeSelector.vue'
 import { useImageWorkspace } from '../../composables/useImageWorkspace'
+import { DataTransformer, OptionAccessors } from '../../utils/data-transformer'
 import type { AppServices } from '../../types/services'
 import { useFullscreen } from '../../composables/useFullscreen'
 import FullscreenDialog from '../FullscreenDialog.vue'
+import type { TemplateSelectOption } from '../../types/select-options'
 
 // 国际化
 const { t } = useI18n()
@@ -602,26 +661,90 @@ const {
   downloadImageFromResult,
   saveSelections,
   cleanup,
-  refreshImageModels
+  refreshTextModels,
+  refreshImageModels,
+  restoreTemplateSelection
 } = useImageWorkspace(services)
 
 // PromptPanel 引用，用于在语言切换后刷新迭代模板选择
 const promptPanelRef = ref<InstanceType<typeof PromptPanelUI> | null>(null)
 
-// 注入 App 层统一的 openTemplateManager 接口
+// 注入 App 层统一的 openTemplateManager / openModelManager 接口
 const appOpenTemplateManager = inject<(type?: 'optimize' | 'userOptimize' | 'iterate' | 'text2imageOptimize' | 'image2imageOptimize' | 'imageIterate') => void>('openTemplateManager', null as any)
+const appOpenModelManager = inject<(tab?: 'text' | 'image') => void>('openModelManager', null as any)
 
 // 将迭代类型映射为图像迭代，并调用 App 入口
-const onOpenTemplateManager = (type: 'optimize' | 'userOptimize' | 'iterate' | 'text2imageOptimize' | 'image2imageOptimize' | 'imageIterate') => {
-  const target = type === 'iterate' ? 'imageIterate' : type
-  if (appOpenTemplateManager) appOpenTemplateManager(target as any)
+  const onOpenTemplateManager = (type: 'optimize' | 'userOptimize' | 'iterate' | 'text2imageOptimize' | 'image2imageOptimize' | 'imageIterate') => {
+    const target = type === 'iterate' ? 'imageIterate' : type
+    if (appOpenTemplateManager) appOpenTemplateManager(target as any)
+  }
+
+// 模板列表（根据当前 image 模式的模板类型加载）
+const templateOptions = ref<TemplateSelectOption[]>([])
+
+const loadTemplateList = async () => {
+  try {
+    if (services?.value?.templateManager) {
+      const list = await services.value.templateManager.listTemplatesByType(templateType.value as any)
+      templateOptions.value = DataTransformer.templatesToSelectOptions(list || [])
+
+      // 注意：不要在这里执行模板重置逻辑，因为这会干扰模式切换时的模板恢复
+      // 模板选择的逻辑应该完全由 useImageWorkspace 的 restoreTemplateSelection 处理
+      console.log('[ImageWorkspace] Template list loaded for type:', templateType.value, 'count:', templateOptions.value.length)
+    } else {
+      templateOptions.value = []
+    }
+  } catch (e) {
+    console.warn('[ImageWorkspace] Failed to load template list:', e)
+    templateOptions.value = []
+  }
 }
+
+watch(templateType, async () => {
+  // 先加载对应类型的模板列表，再恢复该模式下的模板选择，避免下拉在切换时显示为空
+  await loadTemplateList()
+  await nextTick()
+  try {
+    await restoreTemplateSelection()
+  } catch (e) {
+    console.warn('[ImageWorkspace] Failed to restore template after list load:', e)
+  }
+})
 
 // 全屏编辑：复用 useFullscreen 模式，编辑 originalPrompt
 const { isFullscreen, fullscreenValue, openFullscreen } = useFullscreen(
   computed(() => originalPrompt.value),
   (value) => { originalPrompt.value = value }
 )
+
+// ========== 模板 SelectWithConfig 选中绑定 ==========
+// 使用模板对象列表与字符串 id 进行绑定
+const selectedTemplateIdForSelect = computed<string>({
+  get() {
+    const id = selectedTemplate?.value?.id || ''
+    if (!id) return ''
+    // 仅当当前下拉列表中存在该模板时再返回，避免在列表尚未加载完成时出现短暂的失配导致清空
+    const existsInList = (templateOptions.value || []).some((opt) => opt.value === id)
+    return existsInList ? id : ''
+  },
+  set(id: string) {
+    if (!id) {
+      (selectedTemplate as any).value = null
+      return
+    }
+    const option = (templateOptions.value || []).find((opt) => opt.value === id) || null
+    ;(selectedTemplate as any).value = option?.raw || null
+    // 用户选择模板时立即保存到对应模式的存储键
+    if (option?.raw) {
+      nextTick(() => {
+        saveSelections()
+      })
+    }
+  }
+})
+
+// 持久化模板选择的时机由具体的用户操作控制，而不是自动同步
+// 避免在模板选择变化时自动触发saveSelections，防止跨模式数据污染
 
   // 弹窗状态
   const showUploadModal = ref(false)
@@ -666,6 +789,15 @@ const refreshIterateHandler = () => {
   promptPanelRef.value?.refreshIterateTemplateSelect?.()
 }
 
+// 文本模型刷新事件处理器（模型管理器关闭后同步刷新）
+const refreshTextModelsHandler = async () => {
+  try {
+    await refreshTextModels()
+  } catch (e) {
+    console.warn('[ImageWorkspace] Failed to refresh text models after manager close:', e)
+  }
+}
+
 // 图像模型刷新事件处理器（模型管理器关闭后同步刷新）
 const refreshImageModelsHandler = async () => {
   try {
@@ -673,6 +805,27 @@ const refreshImageModelsHandler = async () => {
   } catch (e) {
     console.warn('[ImageWorkspace] Failed to refresh image models after manager close:', e)
   }
+}
+
+// 模板管理器关闭后刷新当前模板列表（并尽量保持当前选择）
+const refreshTemplatesHandler = async () => {
+  try {
+    await loadTemplateList()
+    await nextTick()
+    await restoreTemplateSelection()
+  } catch (e) {
+    console.warn('[ImageWorkspace] Failed to refresh template list after manager close:', e)
+  }
+}
+
+// 下拉获得焦点时，主动刷新模板列表，确保新建/编辑后的模板可见
+const handleTemplateSelectFocus = async () => {
+  await refreshTemplatesHandler()
+}
+
+// 文本模型下拉获得焦点时刷新，确保新建/编辑后的模型立即可用
+const handleTextModelSelectFocus = async () => {
+  await refreshTextModelsHandler()
 }
 
 onMounted(async () => {
@@ -688,8 +841,13 @@ onMounted(async () => {
   // 监听模板语言切换事件，刷新迭代模板选择
   if (typeof window !== 'undefined') {
     window.addEventListener('image-workspace-refresh-iterate-select', refreshIterateHandler)
+    window.addEventListener('image-workspace-refresh-text-models', refreshTextModelsHandler)
     window.addEventListener('image-workspace-refresh-image-models', refreshImageModelsHandler)
+    window.addEventListener('image-workspace-refresh-templates', refreshTemplatesHandler)
   }
+
+  // 加载模板列表
+  await loadTemplateList()
 })
 
 // 清理
@@ -698,7 +856,9 @@ onUnmounted(() => {
   cleanup()
   if (typeof window !== 'undefined') {
     window.removeEventListener('image-workspace-refresh-iterate-select', refreshIterateHandler)
+    window.removeEventListener('image-workspace-refresh-text-models', refreshTextModelsHandler)
     window.removeEventListener('image-workspace-refresh-image-models', refreshImageModelsHandler)
+    window.removeEventListener('image-workspace-refresh-templates', refreshTemplatesHandler)
   }
 })
 </script>

@@ -17,8 +17,8 @@
           <!-- Core Navigation Slot -->
           <template #core-nav>
             <FunctionModeSelector
-              v-model="functionMode"
-              @change="handleModeSelect"
+              :modelValue="functionMode"
+              @update:modelValue="handleModeSelect"
             />
           </template>
 
@@ -125,23 +125,40 @@
                   />
                 </template>
                 <template #model-select>
-                  <ModelSelectUI
-                    :ref="(el) => modelSelectRefs.optimizeModelSelect = el"
-                    :modelValue="modelManager.selectedOptimizeModel"
-                    @update:modelValue="modelManager.selectedOptimizeModel = $event"
+                  <SelectWithConfig
+                    v-model="modelManager.selectedOptimizeModel"
+                    :options="textModelOptions"
+                    :getPrimary="OptionAccessors.getPrimary"
+                    :getSecondary="OptionAccessors.getSecondary"
+                    :getValue="OptionAccessors.getValue"
+                    :placeholder="t('model.select.placeholder')"
+                    size="medium"
                     :disabled="optimizer.isOptimizing"
+                    filterable
+                    :show-config-action="true"
+                    :show-empty-config-c-t-a="true"
+                    @focus="refreshTextModels"
                     @config="modelManager.showConfig = true"
                   />
                 </template>
                 <template #template-select>
-                  <TemplateSelectUI
-                    v-if="services && services.templateManager"
-                    ref="templateSelectRef"
-                    v-model="currentSelectedTemplate"
-                    :type="templateSelectType"
-                    :optimization-mode="selectedOptimizationMode"
-                    @manage="openTemplateManager"
-                  />
+                  <template v-if="services && services.templateManager">
+                    <SelectWithConfig
+                      v-model="selectedTemplateIdForSelect"
+                      :options="templateOptions"
+                      :getPrimary="OptionAccessors.getPrimary"
+                      :getSecondary="OptionAccessors.getSecondary"
+                      :getValue="OptionAccessors.getValue"
+                      :placeholder="t('template.select')"
+                      size="medium"
+                      :disabled="optimizer.isOptimizing"
+                      filterable
+                      :show-config-action="true"
+                      :show-empty-config-c-t-a="true"
+                      @focus="refreshOptimizeTemplates"
+                      @config="handleOpenOptimizeTemplateManager"
+                    />
+                  </template>
                   <NText v-else depth="3" class="p-2 text-sm">
                     {{ t('template.loading') || '加载中...' }}
                   </NText>
@@ -150,7 +167,7 @@
             </NCard>
             
             <!-- 组件 B: ConversationManager (使用v-show替代v-if避免组件频繁销毁重建) -->
-            <NCard v-show="advancedModeEnabled" :style="{ flexShrink: 0, minHeight: '150px', overflow: 'auto' }" content-style="padding: 0;">
+            <NCard v-show="advancedModeEnabled" :style="{ flexShrink: 0, overflow: 'auto' }" content-style="padding: 0;">
               <ConversationManager
                 v-model:messages="optimizationContext"
                 :available-variables="variableManager?.variableManager.value?.resolveAllVariables() || {}"
@@ -214,11 +231,18 @@
             >
               <!-- 模型选择插槽 -->
               <template #model-select>
-                <ModelSelectUI
-                  :ref="(el) => modelSelectRefs.testModelSelect = el"
-                  :modelValue="modelManager.selectedTestModel"
-                  @update:modelValue="modelManager.selectedTestModel = $event"
-                  :disabled="false"
+                <SelectWithConfig
+                  v-model="modelManager.selectedTestModel"
+                  :options="textModelOptions"
+                  :getPrimary="OptionAccessors.getPrimary"
+                  :getSecondary="OptionAccessors.getSecondary"
+                  :getValue="OptionAccessors.getValue"
+                  :placeholder="t('model.select.placeholder')"
+                  size="medium"
+                  filterable
+                  :show-config-action="true"
+                  :show-empty-config-c-t-a="true"
+                  @focus="refreshTextModels"
                   @config="modelManager.showConfig = true"
                 />
               </template>
@@ -279,7 +303,7 @@
         v-if="isReady"
         v-model:show="templateManagerState.showTemplates"
         :templateType="templateManagerState.currentType"
-        @close="() => templateManagerState.handleTemplateManagerClose(() => templateSelectRef?.refresh?.())"
+        @close="handleTemplateManagerClosed"
         @languageChanged="handleTemplateLanguageChanged"
       />
       <HistoryDrawerUI
@@ -335,7 +359,7 @@ hljs.registerLanguage('json', jsonLang)
     // UI Components
     MainLayoutUI, ThemeToggleUI, ActionButtonUI, ModelManagerUI, TemplateManagerUI, HistoryDrawerUI,
     LanguageSwitchDropdown, DataManagerUI, InputPanelUI, PromptPanelUI, OptimizationModeSelectorUI,
-    ModelSelectUI, TemplateSelectUI, TestAreaPanel, UpdaterIcon, VariableManagerModal,
+    SelectWithConfig, TestAreaPanel, UpdaterIcon, VariableManagerModal,
     ImageWorkspace, FunctionModeSelector,
     ConversationManager, OutputDisplay, ContextEditor,
   
@@ -364,8 +388,12 @@ hljs.registerLanguage('json', jsonLang)
     
     // Quick Template Manager
     quickTemplateManager,
+
+    // Data Transformation
+    DataTransformer, OptionAccessors,
   } from '@prompt-optimizer/ui'
-  import type { IPromptService } from '@prompt-optimizer/core'
+import type { IPromptService, Template, ModelConfig } from '@prompt-optimizer/core'
+import type { ModelSelectOption, TemplateSelectOption } from '@prompt-optimizer/ui'
   
   // 1. 基础 composables
   // highlight.js for Naive NCode
@@ -401,7 +429,6 @@ hljs.registerLanguage('json', jsonLang)
   const showDataManager = ref(false)
   const optimizeModelSelect = ref(null)
   const testPanelRef = ref(null)
-  const templateSelectRef = ref<{ refresh?: () => void } | null>(null)
   const promptPanelRef = ref<{ refreshIterateTemplateSelect?: () => void } | null>(null)
   
   // 高级模式状态
@@ -710,7 +737,149 @@ hljs.registerLanguage('json', jsonLang)
       selectedIterateTemplate: toRef(optimizer, 'selectedIterateTemplate')
     }
   )
-  
+
+  const currentSelectedTemplate = computed({
+    get() {
+      return selectedOptimizationMode.value === 'system'
+        ? optimizer.selectedOptimizeTemplate
+        : optimizer.selectedUserOptimizeTemplate
+    },
+    set(newValue) {
+      if (!newValue) return
+      if (selectedOptimizationMode.value === 'system') {
+        optimizer.selectedOptimizeTemplate = newValue
+      } else {
+        optimizer.selectedUserOptimizeTemplate = newValue
+      }
+    }
+  })
+
+  const templateOptions = ref<TemplateSelectOption[]>([])
+  const textModelOptions = ref<ModelSelectOption[]>([])
+
+  const handleOpenOptimizeTemplateManager = () => {
+    const type = templateSelectType.value
+    console.log('[App] Opening template manager for type:', type)
+    openTemplateManager(type as any)
+  }
+
+  const clearCurrentTemplateSelection = () => {
+    if (selectedOptimizationMode.value === 'system') {
+      optimizer.selectedOptimizeTemplate = null
+    } else {
+      optimizer.selectedUserOptimizeTemplate = null
+    }
+  }
+
+  const ensureTemplateSelection = () => {
+    const current = currentSelectedTemplate.value
+    const available = templateOptions.value
+
+    if (current) {
+      const matched = available.find(t => t.raw.id === current.id)
+      if (matched) {
+        if (matched.raw !== current) {
+          currentSelectedTemplate.value = matched.raw
+        }
+        return
+      }
+    }
+
+    if (available.length > 0) {
+      currentSelectedTemplate.value = available[0].raw
+    } else {
+      clearCurrentTemplateSelection()
+    }
+  }
+
+  const refreshOptimizeTemplates = async () => {
+    if (!services.value?.templateManager) {
+      templateOptions.value = []
+      clearCurrentTemplateSelection()
+      return
+    }
+
+    try {
+      const list = await services.value.templateManager.listTemplatesByType(templateSelectType.value as any)
+      templateOptions.value = DataTransformer.templatesToSelectOptions(list || [])
+    } catch (error) {
+      console.warn('[App] Failed to refresh optimize templates:', error)
+      templateOptions.value = []
+    }
+
+    ensureTemplateSelection()
+  }
+
+  const refreshTextModels = async () => {
+    if (!services.value?.modelManager) {
+      textModelOptions.value = []
+      return
+    }
+
+    try {
+      const manager = services.value.modelManager
+      if (typeof (manager as any).ensureInitialized === 'function') {
+        await (manager as any).ensureInitialized()
+      }
+      const enabledModels = await manager.getEnabledModels()
+      textModelOptions.value = DataTransformer.modelsToSelectOptions(enabledModels)
+
+      const availableKeys = new Set(textModelOptions.value.map(opt => opt.value))
+      const fallbackValue = textModelOptions.value[0]?.value || ''
+
+      if (fallbackValue) {
+        if (!availableKeys.has(modelManager.selectedOptimizeModel)) {
+          modelManager.selectedOptimizeModel = fallbackValue
+        }
+        if (!availableKeys.has(modelManager.selectedTestModel)) {
+          modelManager.selectedTestModel = fallbackValue
+        }
+      }
+    } catch (error) {
+      console.warn('[App] Failed to refresh text models:', error)
+      textModelOptions.value = []
+    }
+  }
+
+  const selectedTemplateIdForSelect = computed<string>({
+    get() {
+      const current = currentSelectedTemplate.value
+      if (!current) return ''
+      return templateOptions.value.some(t => t.raw.id === current.id) ? current.id : ''
+    },
+    set(id: string) {
+      if (!id) {
+        clearCurrentTemplateSelection()
+        return
+      }
+      const tpl = templateOptions.value.find(t => t.raw.id === id)
+      if (tpl) {
+        currentSelectedTemplate.value = tpl.raw
+      }
+    }
+  })
+
+  watch(() => services.value?.templateManager, async (manager) => {
+    if (manager) {
+      await refreshOptimizeTemplates()
+    } else {
+      templateOptions.value = []
+      clearCurrentTemplateSelection()
+    }
+  }, { immediate: true })
+
+  watch(() => services.value?.modelManager, async (manager) => {
+    if (manager) {
+      await refreshTextModels()
+    } else {
+      textModelOptions.value = []
+    }
+  }, { immediate: true })
+
+  watch(() => templateSelectType.value, async () => {
+    await refreshOptimizeTemplates()
+  })
+
   // 7. 监听服务初始化
   watch(services, async (newServices) => {
     if (!newServices) return
@@ -745,23 +914,6 @@ hljs.registerLanguage('json', jsonLang)
       window.location.reload()
     }, 1500)
   }
-  
-  // 8. 计算属性和方法
-  const currentSelectedTemplate = computed({
-    get() {
-      return selectedOptimizationMode.value === 'system'
-        ? optimizer.selectedOptimizeTemplate
-        : optimizer.selectedUserOptimizeTemplate
-    },
-    set(newValue) {
-      if (!newValue) return
-      if (selectedOptimizationMode.value === 'system') {
-        optimizer.selectedOptimizeTemplate = newValue
-      } else {
-        optimizer.selectedUserOptimizeTemplate = newValue
-      }
-    }
-  })
   
   // 处理优化提示词
   const handleOptimizePrompt = () => {
@@ -912,9 +1064,7 @@ hljs.registerLanguage('json', jsonLang)
     console.log('[App] 模板语言已切换:', newLanguage)
 
     // 刷新主界面的模板选择组件
-    if (templateSelectRef.value?.refresh) {
-      templateSelectRef.value.refresh()
-    }
+    refreshOptimizeTemplates()
 
     // 刷新迭代页面的模板选择组件
     if (promptPanelRef.value?.refreshIterateTemplateSelect) {
@@ -930,6 +1080,31 @@ hljs.registerLanguage('json', jsonLang)
   // 向子组件提供统一的 openTemplateManager 接口（图像模式复用）
   provide('openTemplateManager', openTemplateManager)
 
+  // 模板管理器关闭回调：刷新基础模式选择，同时通知图像模式刷新模板列表
+  const handleTemplateManagerClosed = () => {
+    try {
+      templateManagerState.handleTemplateManagerClose(() => { refreshOptimizeTemplates() })
+    } catch (e) {
+      console.warn('[App] Failed to run template manager close handler:', e)
+    }
+    refreshOptimizeTemplates()
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('image-workspace-refresh-templates'))
+    }
+  }
+
+  // 提供 openModelManager 接口，支持直接定位到文本/图像页签
+  const openModelManager = (tab: 'text' | 'image' = 'text') => {
+    modelManager.showConfig = true
+    // 等模态渲染后再切换页签
+    setTimeout(() => {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('model-manager:set-tab', { detail: tab }))
+      }
+    }, 0)
+  }
+  provide('openModelManager', openModelManager)
+
   // 模型管理器关闭回调：同步刷新基础模式下拉，并通知图像模式刷新图像模型
   const handleModelManagerClosed = async () => {
     try {
@@ -938,8 +1113,10 @@ hljs.registerLanguage('json', jsonLang)
     } catch (e) {
       console.warn('[App] Failed to refresh text models after manager close:', e)
     }
+    await refreshTextModels()
     // 图像模式：广播刷新图像模型事件（ImageWorkspace 监听并执行刷新）
     if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('image-workspace-refresh-text-models'))
       window.dispatchEvent(new Event('image-workspace-refresh-image-models'))
     }
   }
@@ -1219,3 +1396,4 @@ hljs.registerLanguage('json', jsonLang)
     100% { transform: rotate(360deg); }
   }
   </style>
+

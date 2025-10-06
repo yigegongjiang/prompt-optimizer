@@ -46,20 +46,29 @@ Prompt Optimizer is a powerful AI prompt optimization tool that helps you write 
 - 📝 **Dual Mode Optimization**: Support for both system prompt optimization and user prompt optimization to meet different usage scenarios
 - 🔄 **Comparison Testing**: Real-time comparison between original and optimized prompts for intuitive demonstration of optimization effects
 - 🤖 **Multi-model Integration**: Support for mainstream AI models including OpenAI, Gemini, DeepSeek, Zhipu AI, SiliconFlow, etc.
+- 🖼️ **Image Generation**: Support for Text-to-Image (T2I) and Image-to-Image (I2I) with models like Gemini, Seedream
+- 📊 **Advanced Testing Mode**: Context variable management, multi-turn conversation testing, Function Calling support
 - 🔒 **Secure Architecture**: Pure client-side processing with direct data interaction with AI service providers, bypassing intermediate servers
 - 📱 **Multi-platform Support**: Available as web application, desktop application, Chrome extension, and Docker deployment
 - 🔐 **Access Control**: Password protection feature for secure deployment
 - 🧩 **MCP Protocol Support**: Supports Model Context Protocol (MCP), enabling integration with MCP-compatible AI applications like Claude Desktop
 
-## 🚀 Advanced Features Preview (Beta)
+## 🚀 Advanced Features
 
-> **Preview Environment**: [https://prompt-dev.always200.com](https://prompt-dev.always200.com) | Experience new features and provide feedback
+### Image Generation Mode
+- 🖼️ **Text-to-Image (T2I)**: Generate images from text prompts
+- 🎨 **Image-to-Image (I2I)**: Transform and optimize images based on local files
+- 🔌 **Multi-model Support**: Integrated with mainstream image generation models like Gemini, Seedream
+- ⚙️ **Model Parameters**: Support model-specific parameter configuration (size, style, etc.)
+- 📥 **Preview & Download**: Real-time preview of generated results with download support
 
-- 📊 **Context Variable Management**: Custom variables, multi-turn conversation testing, variable replacement preview
+### Advanced Testing Mode
+- 📊 **Context Variable Management**: Custom variables, batch replacement, variable preview
+- 💬 **Multi-turn Conversation Testing**: Simulate real conversation scenarios to test prompt performance in multi-turn interactions
 - 🛠️ **Function Calling Support**: Function Calling integration with support for OpenAI and Gemini tool calling
-- 🎯 **Advanced Testing Mode**: More flexible prompt testing and debugging capabilities
+- 🎯 **Flexible Debugging**: Enhanced prompt testing and debugging capabilities
 
-*Note: Advanced features are currently in development and will be officially integrated into the main version in future releases*
+For detailed usage instructions, please refer to the [Image Mode Documentation](docs/image-mode.md)
 
 ## Quick Start
 
@@ -313,7 +322,7 @@ pnpm dev:fresh        # Complete reset and restart development environment
 - [x] Desktop application release
 - [x] MCP service release
 - [x] Advanced mode: Variable management, context testing, function calling
-- [ ] Support for image input and multimodal processing
+- [x] Image generation: Text-to-Image (T2I) and Image-to-Image (I2I) support
 - [ ] Support for workspace/project management
 - [ ] Support for prompt favorites and template management
 
@@ -357,29 +366,28 @@ For detailed project status, see [Project Status Document](docs/project-status.m
 #### Q3: How to solve CORS issues with commercial APIs (such as Nvidia's DS API, ByteDance's Volcano API)?
 **A**: These platforms typically have strict CORS restrictions. Recommended solutions:
 
-1. **Use Vercel Proxy** (Convenient solution)
-   - Use the online version: [prompt.always200.com](https://prompt.always200.com)
-   - Or deploy to your own Vercel platform
-   - Check "Use Vercel Proxy" option in model settings
-   - Request flow: Browser → Vercel → Model service provider
-   - For detailed steps, please refer to the [Vercel Deployment Guide](docs/user/deployment/vercel_en.md)
+1. **Use Desktop Application** (Most Recommended)
+   - Desktop app has no CORS restrictions as a native application
+   - Can directly connect to any API service, including locally deployed models
+   - Provides the most complete and stable feature experience
+   - Download from [GitHub Releases](https://github.com/linshenkx/prompt-optimizer/releases)
 
-2. **Use self-deployed API proxy service** (Reliable solution)
-   - Deploy open-source API aggregation/proxy tools like OneAPI
+2. **Use Self-deployed API Proxy Service** (Professional solution)
+   - Deploy open-source API aggregation/proxy tools like OneAPI, NewAPI
    - Configure as custom API endpoint in settings
    - Request flow: Browser → Proxy service → Model service provider
+   - Full control over security policies and access permissions
 
-#### Q4: What are the drawbacks or risks of using Vercel proxy?
-**A**: Using Vercel proxy may trigger risk control mechanisms of some model service providers. Some vendors may identify requests from Vercel as proxy behavior, thereby limiting or denying service. If you encounter this issue, we recommend using a self-deployed proxy service.
+**Note**: All web versions (including online version, Vercel deployment, Docker deployment) are pure frontend applications and subject to browser CORS restrictions. Only the desktop version or using an API proxy service can solve CORS issues.
 
-#### Q5: I have correctly configured CORS policies for my local model (like Ollama), why can't I still connect using the online version?
+#### Q4: I have correctly configured CORS policies for my local model (like Ollama), why can't I still connect using the online version?
 **A**: This is caused by the browser's **Mixed Content security policy**. For security reasons, browsers block secure HTTPS pages (like the online version) from sending requests to insecure HTTP addresses (like your local Ollama service).
 
 **Solutions**:
 To bypass this limitation, you need to have the application and API under the same protocol (e.g., both HTTP). We recommend the following approaches:
-1. **Use the desktop version**: Desktop applications have no browser restrictions and are the most stable and reliable way to connect to local models.
-2. **Docker deployment**: Docker deployment also uses HTTP
-3. **Use Chrome extension**: Extensions can bypass some security restrictions in certain situations.
+1. **Use the desktop version**: Desktop applications have no browser restrictions and are the most stable and reliable way to connect to local models
+2. **Use Docker deployment (HTTP)**: Access via `http://localhost:8081`, both the app and local Ollama use HTTP
+3. **Use Chrome extension**: Extensions can bypass some security restrictions in certain situations
 
 </details>
 

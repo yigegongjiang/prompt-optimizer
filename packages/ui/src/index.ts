@@ -34,6 +34,7 @@ export { default as OutputDisplay } from './components/OutputDisplay.vue'
 export { default as TemplateManagerUI } from './components/TemplateManager.vue'
 export { default as TemplateSelectUI } from './components/TemplateSelect.vue'
 export { default as ModelSelectUI } from './components/ModelSelect.vue'
+export { default as SelectWithConfig } from './components/SelectWithConfig.vue'
 export { default as HistoryDrawerUI } from './components/HistoryDrawer.vue'
 export { default as InputPanelUI } from './components/InputPanel.vue'
 export { default as MainLayoutUI } from './components/MainLayout.vue'
@@ -168,3 +169,7 @@ export { quickTemplateManager } from './data/quickTemplates'
 // 导出图像模式组件与核心图像服务（转发 core 能力）
 export { default as ImageWorkspace } from './components/image-mode/ImageWorkspace.vue'
 export { ImageModelManager, createImageModelManager, ImageService, createImageService } from '@prompt-optimizer/core'
+
+// 导出数据转换工具和类型
+export { DataTransformer, OptionAccessors } from './utils/data-transformer'
+export type { SelectOption, ModelSelectOption, TemplateSelectOption } from './types/select-options'
