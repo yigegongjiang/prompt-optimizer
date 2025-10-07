@@ -15,6 +15,10 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+// === MITM 抓包支持 ===
+// 禁用 Node.js 的 TLS 证书验证，允许 MITM 代理（如 Proxyman/Charles）拦截 HTTPS 请求
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
 // 在所有其他模块之前初始化日志系统
 const ConsoleLogger = require('./config/console-logger');
 const consoleLogger = new ConsoleLogger();
