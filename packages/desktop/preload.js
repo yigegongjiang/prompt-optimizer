@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 // IPC事件名称常量 - 直接内联避免沙箱环境的模块加载问题
 const IPC_EVENTS = {
   UPDATE_CHECK: 'updater-check-update',
+  UPDATE_OPEN_RELEASE_PAGE: 'updater-open-release-page',
   UPDATE_START_DOWNLOAD: 'updater-start-download',
   UPDATE_INSTALL: 'updater-install-update',
   UPDATE_IGNORE_VERSION: 'updater-ignore-version',
@@ -19,6 +20,8 @@ const IPC_EVENTS = {
   UPDATE_ERROR: 'update-error',
   UPDATE_DOWNLOAD_STARTED: 'updater-download-started'
 };
+
+const REMOTE_STORAGE_CHANNEL = 'remote-storage:invoke';
 
 // 简单的超时包装器，避免过度设计
 const withTimeout = (promise, timeoutMs = 30000) => {
@@ -238,6 +241,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
+  imageUnderstanding: {
+    understand: async (request) => {
+      const result = await ipcRenderer.invoke('image-understanding-understand', request);
+      if (!result.success) {
+        throw createIpcError(result.error);
+      }
+      return result.data;
+    }
+  },
+
   // Model Manager interface
   model: {
     ensureInitialized: async () => {
@@ -423,6 +436,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
        }
        return result.data;
      },
+     generateMultiImage: async (request) => {
+       const result = await ipcRenderer.invoke('image-generateMultiImage', request);
+       if (!result.success) {
+         throw createIpcError(result.error);
+       }
+       return result.data;
+     },
  
      validateRequest: async (request) => {
        const result = await ipcRenderer.invoke('image-validateRequest', request);
@@ -440,6 +460,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
      },
      validateImage2ImageRequest: async (request) => {
        const result = await ipcRenderer.invoke('image-validateImage2ImageRequest', request);
+       if (!result.success) {
+         throw createIpcError(result.error);
+       }
+       return result.data;
+     },
+     validateMultiImageRequest: async (request) => {
+       const result = await ipcRenderer.invoke('image-validateMultiImageRequest', request);
        if (!result.success) {
          throw createIpcError(result.error);
        }
@@ -721,6 +748,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     updateFavorite: async (id, updates) => {
       await invokeFavorite('favorite-updateFavorite', id, updates);
     },
+    setFavoritePromptAssetCurrentVersion: async (id, versionId) => {
+      await invokeFavorite('favorite-setFavoritePromptAssetCurrentVersion', id, versionId);
+    },
+    deleteFavoritePromptAssetVersion: async (id, versionId) => {
+      await invokeFavorite('favorite-deleteFavoritePromptAssetVersion', id, versionId);
+    },
     deleteFavorite: async (id) => {
       await invokeFavorite('favorite-deleteFavorite', id);
     },
@@ -789,6 +822,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       }
       return result.data;
     },
+    optimizeMessage: async (request) => {
+      const result = await ipcRenderer.invoke('prompt-optimizeMessage', request);
+      if (!result.success) {
+        throw createIpcError(result.error);
+      }
+      return result.data;
+    },
     // 统一的流式封装（与 llm.sendMessageStream 同模式）
     optimizePromptStream: async (request, callbacks) => {
       const streamId = generateStreamId();
@@ -821,6 +861,42 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on(`stream-error-${streamId}`, errorListener);
 
       const result = await ipcRenderer.invoke('prompt-optimizePromptStream', request, streamId);
+      if (!result.success) {
+        cleanup();
+        throw createIpcError(result.error);
+      }
+    },
+    optimizeMessageStream: async (request, callbacks) => {
+      const streamId = generateStreamId();
+
+      const tokenListener = (event, token) => {
+        if (callbacks?.onToken) callbacks.onToken(token);
+      };
+      const reasoningListener = (event, token) => {
+        if (callbacks?.onReasoningToken) callbacks.onReasoningToken(token);
+      };
+      const finishListener = () => {
+        cleanup();
+        if (callbacks?.onComplete) callbacks.onComplete();
+      };
+      const errorListener = (event, error) => {
+        cleanup();
+        if (callbacks?.onError) callbacks.onError(new Error(error));
+      };
+
+      const cleanup = () => {
+        ipcRenderer.removeListener(`stream-token-${streamId}`, tokenListener);
+        ipcRenderer.removeListener(`stream-reasoning-token-${streamId}`, reasoningListener);
+        ipcRenderer.removeListener(`stream-finish-${streamId}`, finishListener);
+        ipcRenderer.removeListener(`stream-error-${streamId}`, errorListener);
+      };
+
+      ipcRenderer.on(`stream-token-${streamId}`, tokenListener);
+      ipcRenderer.on(`stream-reasoning-token-${streamId}`, reasoningListener);
+      ipcRenderer.on(`stream-finish-${streamId}`, finishListener);
+      ipcRenderer.on(`stream-error-${streamId}`, errorListener);
+
+      const result = await ipcRenderer.invoke('prompt-optimizeMessageStream', request, streamId);
       if (!result.success) {
         cleanup();
         throw createIpcError(result.error);
@@ -862,7 +938,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         throw createIpcError(result.error);
       }
     },
-    testPromptStream: async (systemPrompt, userPrompt, modelKey, callbacks) => {
+    testPromptStream: async (systemPrompt, userPrompt, modelKey, callbacks, inputImages) => {
       const streamId = generateStreamId();
 
       const tokenListener = (event, token) => {
@@ -892,7 +968,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on(`stream-finish-${streamId}`, finishListener);
       ipcRenderer.on(`stream-error-${streamId}`, errorListener);
 
-      const result = await ipcRenderer.invoke('prompt-testPromptStream', systemPrompt, userPrompt, modelKey, streamId);
+      const result = await ipcRenderer.invoke('prompt-testPromptStream', systemPrompt, userPrompt, modelKey, streamId, inputImages);
       if (!result.success) {
         cleanup();
         throw createIpcError(result.error);
@@ -940,15 +1016,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
         throw createIpcError(result.error);
       }
     },
-    iteratePrompt: async (originalPrompt, lastOptimizedPrompt, iterateInput, modelKey, templateId) => {
-      const result = await ipcRenderer.invoke('prompt-iteratePrompt', originalPrompt, lastOptimizedPrompt, iterateInput, modelKey, templateId);
+    iteratePrompt: async (originalPrompt, lastOptimizedPrompt, iterateInput, modelKey, templateId, contextData) => {
+      const result = await ipcRenderer.invoke('prompt-iteratePrompt', originalPrompt, lastOptimizedPrompt, iterateInput, modelKey, templateId, contextData);
       if (!result.success) {
         throw createIpcError(result.error);
       }
       return result.data;
     },
-    testPrompt: async (systemPrompt, userPrompt, modelKey) => {
-      const result = await ipcRenderer.invoke('prompt-testPrompt', systemPrompt, userPrompt, modelKey);
+    testPrompt: async (systemPrompt, userPrompt, modelKey, inputImages) => {
+      const result = await ipcRenderer.invoke('prompt-testPrompt', systemPrompt, userPrompt, modelKey, inputImages);
       if (!result.success) {
         throw createIpcError(result.error);
       }
@@ -1020,6 +1096,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       }
       return result.data;
     }
+  },
+
+  remoteStorage: {
+    invoke: async (request) => {
+      const result = await ipcRenderer.invoke(REMOTE_STORAGE_CHANNEL, request);
+      if (!result.success) {
+        throw createIpcError(result.error);
+      }
+      return result.data;
+    },
   },
 
   // Context Repository interface
@@ -1295,6 +1381,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
       }
       return result.data;
     },
+
+    openReleasePage: async (version) => {
+      const result = await withTimeout(
+        ipcRenderer.invoke(IPC_EVENTS.UPDATE_OPEN_RELEASE_PAGE, version),
+        10000
+      );
+      if (!result.success) {
+        throw createIpcError(result.error);
+      }
+      return result.data;
+    },
     
     startDownload: async () => {
       const result = await withTimeout(
@@ -1302,11 +1399,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         10000 // 10秒超时，启动下载应该很快
       );
       if (!result.success) {
-        // 保留完整的错误信息
-        const error = new Error(result.error);
-        error.originalError = result.error;
-        error.detailedMessage = result.error;
-        throw error;
+        throw createIpcError(result.error);
       }
       return result.data;
     },
@@ -1316,11 +1409,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         10000 // 10秒超时，安装启动应该很快
       );
       if (!result.success) {
-        // 保留完整的错误信息
-        const error = new Error(result.error);
-        error.originalError = result.error;
-        error.detailedMessage = result.error;
-        throw error;
+        throw createIpcError(result.error);
       }
       return result.data;
     },
@@ -1373,10 +1462,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         30000 // 30秒超时，现在只等待下载启动，不等待完成，所以30秒足够
       );
       if (!result.success) {
-        const error = new Error(result.error || 'Failed to download specific version');
-        error.originalError = result.error;
-        error.detailedMessage = result.error;
-        throw error;
+        throw createIpcError(result.error || 'Failed to download specific version');
       }
       return result.data;
     },

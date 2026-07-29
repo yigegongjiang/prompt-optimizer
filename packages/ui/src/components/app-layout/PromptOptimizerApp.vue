@@ -17,15 +17,15 @@
         :hljs="hljsInstance"
     >
         <div v-if="isInitializing" class="loading-container">
-            <div class="spinner"></div>
-            <p>{{ t("log.info.initializing") }}</p>
+            <NSpin size="medium" />
+            <NText depth="2">{{ t("log.info.initializing") }}</NText>
         </div>
         <div v-else-if="!services" class="loading-container error">
-            <p>{{ t("toast.error.appInitFailed") }}</p>
+            <NResult status="error" :title="t('toast.error.appInitFailed')" />
         </div>
         <div v-else-if="!isReady" class="loading-container">
-            <div class="spinner"></div>
-            <p>{{ t("log.info.initializing") }}</p>
+            <NSpin size="medium" />
+            <NText depth="2">{{ t("log.info.initializing") }}</NText>
         </div>
         <template v-else>
             <MainLayoutUI>
@@ -36,7 +36,10 @@
 
                 <!-- Core Navigation Slot -->
                 <template #core-nav>
-                    <AppCoreNav />
+                    <AppCoreNav
+                        :workspace-path="activeWorkspaceContextPath"
+                        :allow-workspace-reselect="isFavoritesRoute"
+                    />
                 </template>
 
                 <!-- Actions Slot -->
@@ -45,9 +48,14 @@
                         @open-templates="openTemplateManager"
                         @open-history="historyManager.showHistory = true"
                         @open-model-manager="modelManager.showConfig = true"
-                        @open-favorites="showFavoriteManager = true"
+                        @open-favorites="openFavoritesPage"
                         @open-data-manager="showDataManager = true"
                         @open-variables="handleOpenVariableManager()"
+                        :favorites-active="isFavoritesRoute"
+                        :backup-reminder-due="dataBackupReminderDue"
+                        :app-version="appVersion"
+                        @open-website="openOfficialWebsite"
+                        @open-docs="openDocumentationSite"
                         @open-github="openGithubRepo"
                     />
                 </template>
@@ -109,13 +117,12 @@
             <FavoriteManagerUI
                 v-if="isReady"
                 :show="showFavoriteManager"
+                :use-favorite="handleUseFavorite"
                 @update:show="
                     (v: boolean) => {
                         if (!v) showFavoriteManager = false;
                     }
                 "
-                @optimize-prompt="handleFavoriteOptimizePrompt"
-                @use-favorite="handleUseFavorite"
             />
 
             <!-- 保存收藏对话框 -->
@@ -125,6 +132,7 @@
                 :content="saveFavoriteData?.content || ''"
                 :original-content="saveFavoriteData?.originalContent || ''"
                 :prefill="saveFavoriteData?.prefill"
+                :candidate-source="saveFavoriteData?.candidateSource"
                 :current-function-mode="routeFunctionMode"
                 :current-optimization-mode="selectedOptimizationMode"
                 @saved="handleSaveFavoriteComplete"
@@ -231,11 +239,23 @@ import {
 } from "vue";
 import { RouterView } from "vue-router";
 import { router as routerInstance } from '../../router';
+import {
+    DEFAULT_WORKSPACE_PATH,
+    WORKSPACE_SUB_MODE_KEYS,
+    normalizeWorkspacePath,
+    parseWorkspaceRoutePath,
+    resolveWorkspacePathFallback,
+} from '../../router/workspaceRoutes';
+import { createExternalDataLoadingGate } from '../../utils/external-data-loading'
+import { openExternalUrl } from '../../utils/open-external-url'
 import { registerOptionalIntegrations } from '../../integrations/registerOptionalIntegrations';
 import { useI18n } from "vue-i18n";
 import {
     NConfigProvider,
     NGlobalStyle,
+    NResult,
+    NSpin,
+    NText,
 } from "naive-ui";
 import hljs from "highlight.js/lib/core";
 import jsonLang from "highlight.js/lib/languages/json";
@@ -256,6 +276,9 @@ import ContextEditor from '../context-mode/ContextEditor.vue'
 import PromptPreviewPanel from '../PromptPreviewPanel.vue'
 import AppHeaderActions from './AppHeaderActions.vue'
 import AppCoreNav from './AppCoreNav.vue'
+import { createWorkspaceRouteSwitchController } from './workspaceRouteSwitch'
+import { favoritesPageActionsKey } from '../favorites/favorites-page-context'
+import rootPackageJson from '../../../../../package.json'
 
 // Composables - 使用 barrel exports
 import {
@@ -263,7 +286,6 @@ import {
     usePromptOptimizer,
     usePromptHistory,
     usePromptPreview,
-    usePromptTester,
     // 模型相关
     useModelManager,
     useModelSelectRefs,
@@ -283,6 +305,7 @@ import {
     useTemporaryVariables,
     // UI 相关
     useToast,
+    useConfirmDialog,
     useNaiveTheme,
      // 系统相关
      useAppInitializer,
@@ -297,6 +320,7 @@ import { initializeI18nWithStorage, setI18nServices } from '../../plugins/i18n'
 
 // Pinia functions
 import { setPiniaServices, getPiniaServices } from '../../plugins/pinia'
+import { parseSubModeKey } from '../../router/guards'
 // ⚠️ Codex 建议：改用直接路径导入，避免 barrel exports 循环依赖导致 TDZ
 import { useSessionManager, type SubModeKey } from '../../stores/session/useSessionManager'
 import { useBasicSystemSession } from '../../stores/session/useBasicSystemSession'
@@ -306,23 +330,30 @@ import { useProVariableSession } from '../../stores/session/useProVariableSessio
 import { useSessionRestoreCoordinator } from '../../composables/session/useSessionRestoreCoordinator'
 import { useImageText2ImageSession } from '../../stores/session/useImageText2ImageSession'
 import { useImageImage2ImageSession } from '../../stores/session/useImageImage2ImageSession'
+import { useImageMultiImageSession } from '../../stores/session/useImageMultiImageSession'
 import { useGlobalSettings } from '../../stores/settings/useGlobalSettings'
 
 import type { TemplateManagerTemplateType } from '../../composables/prompt/useTemplateManager'
 
 // Data Transformation
 import { DataTransformer } from '../../utils/data-transformer'
+import { getProviderDisplayName, getTextModelConfigDisplayName } from '../../utils/provider-display'
+import {
+  DATA_BACKUP_STATUS_EVENT,
+  isDataBackupReminderDue,
+} from '../../utils/data-backup-reminder'
 
 // Types
 import type { ModelSelectOption, TestAreaPanelInstance } from '../../types'
-import { type IPromptService, type PromptRecordChain, type PatchOperation, type Template, type TemplateType, type FunctionMode, type BasicSubMode, type ProSubMode, type ImageSubMode, type OptimizationMode, type ConversationMessage, type ToolDefinition, type ContextEditorState, type ContextMode } from "@prompt-optimizer/core";
+import { type IPromptService, type PromptAssetBinding, type PromptSessionOrigin, type PromptRecordChain, type PatchOperation, type Template, type TemplateType, type FunctionMode, type BasicSubMode, type ProSubMode, type ImageSubMode, type OptimizationMode, type ConversationMessage, type ToolDefinition, type ContextEditorState, type ContextMode, type FavoritePrompt } from "@prompt-optimizer/core";
 
 // 1. 基础 composables
 const hljsInstance = hljs;
 const i18n = useI18n();
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 const t = i18n.t;  // 在模板中使用
 const toast = useToast();
+const confirmDialog = useConfirmDialog();
 
 // ========= Chunk-load failure recovery =========
 // A long-lived tab can keep running an old main bundle after a new deployment.
@@ -358,7 +389,12 @@ const promptRefreshForNewDeploy = async (reason: unknown) => {
     }
     window.sessionStorage.setItem(CHUNK_LOAD_REFRESH_GUARD_KEY, '1');
 
-    const ok = window.confirm(t('toast.warning.chunkLoadRefreshConfirm'));
+    const ok = await confirmDialog.warning({
+      title: t('common.warning'),
+      content: t('toast.warning.chunkLoadRefreshConfirm'),
+      positiveText: t('common.confirm'),
+      negativeText: t('common.cancel'),
+    });
     if (!ok) {
       toast.warning(t('toast.warning.chunkLoadRefreshDeclined'), 8000);
       return;
@@ -382,7 +418,26 @@ const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
 };
 
 // 2. 初始化应用服务
-const { services, isInitializing } = useAppInitializer();
+const { services, isInitializing, startupRepairReport } = useAppInitializer();
+
+const hasShownStartupRepairToast = ref(false)
+
+watch(
+  [isInitializing, startupRepairReport],
+  ([initializing, report]) => {
+    if (initializing || !report || hasShownStartupRepairToast.value) {
+      return
+    }
+
+    if (!Array.isArray(report.actions) || report.actions.length === 0) {
+      return
+    }
+
+    hasShownStartupRepairToast.value = true
+    toast.warning(t('toast.warning.startupRepair', { count: report.actions.length }))
+  },
+  { immediate: true },
+)
 
 // 3. 初始化功能模式和子模式（必须在 sessionManager 之前）
 //
@@ -401,11 +456,11 @@ const { services, isInitializing } = useAppInitializer();
 // 🔧 修复：保存 composable 返回值，避免在 watch 回调中重复调用（导致 inject() 错误）
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const functionModeApi = useFunctionMode(services);
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 const basicSubModeApi = useBasicSubMode(services);
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 const proSubModeApi = useProSubMode(services);
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 const imageSubModeApi = useImageSubMode(services);
 
 // 3.5. 🔧 Step A: 建立路由驱动的单一真源（优先于 state，避免双真源）
@@ -414,58 +469,67 @@ const imageSubModeApi = useImageSubMode(services);
 // 解决方案：直接导入 router 实例，使用 currentRoute 访问路由状态
 // ⚠️ 重要：computed 只做纯解析，纠错逻辑移到独立的 watch（避免循环导航）
 //
-// 纯解析函数：从路由路径提取模式和子模式
-const parseRouteInfo = () => {
-  const currentRoute = routerInstance.currentRoute.value
-  const path = currentRoute.path
-  const subMode = path.split('/')[2]
+const getWorkspacePathFromGlobalSettings = () => {
+  const globalSettings = useGlobalSettings()
+  const { functionMode, basicSubMode, proSubMode, imageSubMode } = globalSettings.state
+  if (functionMode === 'image') return normalizeWorkspacePath(`/image/${imageSubMode}`)
+  if (functionMode === 'pro') return normalizeWorkspacePath(`/pro/${proSubMode}`)
+  return normalizeWorkspacePath(`/basic/${basicSubMode}`)
+}
 
-  // 解析 functionMode
-  let functionMode: 'basic' | 'pro' | 'image' = 'basic'
-  if (path.startsWith('/basic')) functionMode = 'basic'
-  else if (path.startsWith('/pro')) functionMode = 'pro'
-  else if (path.startsWith('/image')) functionMode = 'image'
-  else if (path === '/' || path === '') functionMode = 'basic'  // 根路径默认
+const getCurrentRouteFromWorkspaceQuery = () =>
+  normalizeWorkspacePath(routerInstance.currentRoute.value.query.from)
 
-  // 解析子模式（带白名单验证）
-  const parseSubMode = (
-    mode: 'basic' | 'pro' | 'image',
-    subModeParam: string | undefined
-  ): { subMode: string; isValid: boolean; canonicalSubMode: string } => {
-    const validSubModes: Record<string, string[]> = {
-      basic: ['system', 'user'],
-      pro: ['multi', 'variable'],  // ✅ pro 模式支持 multi 和 variable
-      image: ['text2image', 'image2image'],
+const lastWorkspacePath = ref<string | null>(
+  normalizeWorkspacePath(routerInstance.currentRoute.value.path)
+  ?? getCurrentRouteFromWorkspaceQuery()
+)
+
+const isFavoritesRoute = computed(() => routerInstance.currentRoute.value.path === '/favorites')
+
+watch(
+  () => routerInstance.currentRoute.value.fullPath,
+  () => {
+    const currentWorkspacePath = normalizeWorkspacePath(routerInstance.currentRoute.value.path)
+    if (currentWorkspacePath) {
+      lastWorkspacePath.value = currentWorkspacePath
+      return
     }
 
-    const allowed = validSubModes[mode] || []
-    const isValid = subModeParam !== undefined && allowed.includes(subModeParam)
-
-    // ✅ 移除错误的兼容性映射，直接使用原始 subMode
-    let canonicalSubMode = subModeParam || ''
-
-    // 默认值（仅在 subModeParam 为空或非法时使用）
-    if (!canonicalSubMode || !isValid) {
-      if (mode === 'image') canonicalSubMode = 'text2image'
-      else if (mode === 'pro') canonicalSubMode = 'variable'
-      else canonicalSubMode = 'system'
+    if (isFavoritesRoute.value) {
+      const fromPath = getCurrentRouteFromWorkspaceQuery()
+      if (fromPath) {
+        lastWorkspacePath.value = fromPath
+      }
     }
+  },
+  { immediate: true },
+)
 
-    return { subMode: canonicalSubMode, isValid, canonicalSubMode }
-  }
+const activeWorkspaceContextPath = computed(() =>
+  resolveWorkspacePathFallback(
+    routerInstance.currentRoute.value.path,
+    lastWorkspacePath.value,
+    () => getWorkspacePathFromGlobalSettings(),
+  ),
+)
 
-  const subModeInfo = parseSubMode(functionMode, subMode)
+// 纯解析函数：从工作区路径提取模式和子模式；收藏页等非工作区路径沿用最近工作区上下文
+const parseRouteInfo = (path = activeWorkspaceContextPath.value) => {
+  const workspaceRoute = parseWorkspaceRoutePath(path) ?? parseWorkspaceRoutePath(DEFAULT_WORKSPACE_PATH)!
+  const functionMode = workspaceRoute.mode
+  const subMode = workspaceRoute.subMode
 
   return {
     functionMode,
     basicSubMode:
-      (functionMode === 'basic' ? subModeInfo.canonicalSubMode : 'system') as 'system' | 'user',
+      (functionMode === 'basic' ? subMode : 'system') as 'system' | 'user',
     proSubMode:
-      (functionMode === 'pro' ? subModeInfo.canonicalSubMode : 'variable') as 'multi' | 'variable',
+      (functionMode === 'pro' ? subMode : 'variable') as 'multi' | 'variable',
     imageSubMode:
-      (functionMode === 'image' ? subModeInfo.canonicalSubMode : 'text2image') as 'text2image' | 'image2image',
-    isValid: subModeInfo.isValid,
-    canonicalPath: `/${functionMode}/${subModeInfo.canonicalSubMode}`,
+      (functionMode === 'image' ? subMode : 'text2image') as 'text2image' | 'image2image' | 'multiimage',
+    isValid: true,
+    canonicalPath: workspaceRoute.path,
   }
 }
 
@@ -500,9 +564,10 @@ watch(
 // ========== 路由 ⇢ GlobalSettings（仅记录，不反向驱动路由） ==========
 watch(
   () => routerInstance.currentRoute.value.path,
-  () => {
+  (currentPath) => {
     const globalSettings = useGlobalSettings()
     if (!globalSettings.hasRestored) return
+    if (!parseWorkspaceRoutePath(currentPath)) return
 
     const routeInfo = parseRouteInfo()
 
@@ -572,7 +637,8 @@ const hasRestoredInitialState = ref(false);
 
 // ✅ 外部数据加载中标志（防止模式切换的自动 restore 覆盖外部数据）
 // 适用场景：历史记录恢复、收藏加载、模板导入等任何外部数据加载导致模式切换的情况
-const isLoadingExternalData = ref(false);
+const externalDataLoadingGate = createExternalDataLoadingGate();
+const isLoadingExternalData = externalDataLoadingGate.isLoading;
 
 // 5. 控制主UI渲染的标志
 // 🔧 必须等待路由初始化完成，避免短暂显示根路径的空白页
@@ -590,6 +656,7 @@ const servicesForContextEditor = computed(() => services?.value || null);
 // 6. 创建所有必要的引用
 const promptService = shallowRef<IPromptService | null>(null);
 const showDataManager = ref(false);
+const dataBackupReminderDue = ref(isDataBackupReminderDue());
 
 type ContextWorkspaceExpose = {
     // Vue ComponentPublicInstance 会自动 unwrap expose 里的 Ref，因此这里使用已解包的类型
@@ -793,6 +860,7 @@ const proMultiMessageSession = useProMultiMessageSession();
 const proVariableSession = useProVariableSession();
 const imageText2ImageSession = useImageText2ImageSession();
 const imageImage2ImageSession = useImageImage2ImageSession();
+const imageMultiImageSession = useImageMultiImageSession();
 
 // 🔧 Step E: 使用 route-computed 代替旧 state
 const activeBasicSession = computed(() =>
@@ -817,7 +885,9 @@ const selectedOptimizeModelKey = computed<string>({
             const session =
                 routeImageSubMode.value === "text2image"
                     ? imageText2ImageSession
-                    : imageImage2ImageSession;
+                    : routeImageSubMode.value === "multiimage"
+                        ? imageMultiImageSession
+                        : imageImage2ImageSession;
             return session.selectedTextModelKey || "";
         }
         return "";
@@ -840,7 +910,9 @@ const selectedOptimizeModelKey = computed<string>({
             const session =
                 routeImageSubMode.value === "text2image"
                     ? imageText2ImageSession
-                    : imageImage2ImageSession;
+                    : routeImageSubMode.value === "multiimage"
+                        ? imageMultiImageSession
+                        : imageImage2ImageSession;
             session.updateTextModel(next);
         }
     },
@@ -936,6 +1008,7 @@ const optimizer = usePromptOptimizer(
         optimizedReasoning: basicSessionOptimizedReasoning,
         currentChainId: basicSessionChainId,
         currentVersionId: basicSessionVersionId,
+        getSourceBindingSession: () => activeBasicSession.value,
     },
 );
 
@@ -1015,7 +1088,7 @@ const handleContextEditorSaveSafe = (context?: {
 
         // Best-effort persist the pro-multi session after an explicit save.
         void proMultiMessageSession.saveSession()
-        toast.success('上下文已更新')
+        toast.success(t('context.saveSuccess'))
         return
     }
 
@@ -1028,14 +1101,6 @@ provide("variableManager", variableManager);
 provide("optimizationContext", optimizationContext);
 provide("optimizationContextTools", optimizationContextTools);
 
-// 基础模式提示词测试
-const promptTester = usePromptTester(
-    services,
-    selectedTestModelKey,
-    selectedOptimizationMode,
-    variableManager
-);
-
 // ========== Session Store 状态同步 ==========
 
 // 🔧 Step E: 使用 route-computed 代替旧 state
@@ -1045,7 +1110,11 @@ const getCurrentSession = () => {
     } else if (routeFunctionMode.value === 'pro') {
         return routeProSubMode.value === 'multi' ? proMultiMessageSession : proVariableSession;
     } else if (routeFunctionMode.value === 'image') {
-        return routeImageSubMode.value === 'text2image' ? imageText2ImageSession : imageImage2ImageSession;
+        return routeImageSubMode.value === 'text2image'
+            ? imageText2ImageSession
+            : routeImageSubMode.value === 'multiimage'
+                ? imageMultiImageSession
+                : imageImage2ImageSession;
     }
     return basicSystemSession;
 };
@@ -1056,7 +1125,9 @@ const getCurrentBasicSession = () =>
 const getCurrentImageSession = () =>
     routeImageSubMode.value === 'text2image'
         ? imageText2ImageSession
-        : imageImage2ImageSession;
+        : routeImageSubMode.value === 'multiimage'
+            ? imageMultiImageSession
+            : imageImage2ImageSession;
 
 /**
  * 🔧 方案 A 修复：恢复 Basic 模式的 session 状态（移除冗余赋值）
@@ -1064,7 +1135,7 @@ const getCurrentImageSession = () =>
  * 设计原则：
  * - Basic 模式的核心状态（prompt/optimizedPrompt/reasoning/chainId/versionId）
  *   已通过 computed 绑定到 session store（单一真源），无需手动赋值
- * - 只恢复未绑定的 UI 状态（testContent/modelManager/isCompareMode/testResults）
+ * - 只恢复未绑定的 UI 状态（testContent/modelManager/isCompareMode）
  *
  * 根因分析：
  * - 旧逻辑手动赋值 optimizer.prompt 等字段，破坏了"单一真源"架构
@@ -1083,29 +1154,6 @@ const restoreBasicOrProVariableSession = () => {
     // 恢复对比模式
     isCompareMode.value = session.isCompareMode;
 
-    // 🔧 恢复测试结果（仅 Basic 模式使用 promptTester）
-    // 只恢复稳定字段，不恢复 isTesting* 临时状态
-    if (session.testResults) {
-        promptTester.testResults.originalResult =
-            session.testResults.originalResult || '';
-        promptTester.testResults.originalReasoning =
-            session.testResults.originalReasoning || '';
-        promptTester.testResults.optimizedResult =
-            session.testResults.optimizedResult || '';
-        promptTester.testResults.optimizedReasoning =
-            session.testResults.optimizedReasoning || '';
-        // 重置测试中状态
-        promptTester.testResults.isTestingOriginal = false;
-        promptTester.testResults.isTestingOptimized = false;
-    } else {
-        // 如果 session 中没有测试结果，清空当前测试结果
-        promptTester.testResults.originalResult = '';
-        promptTester.testResults.originalReasoning = '';
-        promptTester.testResults.optimizedResult = '';
-        promptTester.testResults.optimizedReasoning = '';
-        promptTester.testResults.isTestingOriginal = false;
-        promptTester.testResults.isTestingOptimized = false;
-    }
 };
 
 /**
@@ -1157,7 +1205,7 @@ const restoreProVariableSessionToUserWorkspace = async () => {
             contextUserOptimization.currentVersions = chain.versions;
             // currentVersionId 已通过 binding 绑定，无需手动赋值
         } catch (error) {
-            console.warn('[PromptOptimizerApp] Pro-user 恢复链失败，使用 session 快照继续:', error);
+            console.warn('[PromptOptimizerApp] Failed to restore the Pro-user chain; continuing with the session snapshot:', error);
         }
     }
 };
@@ -1281,27 +1329,17 @@ const restoreCoordinator = useSessionRestoreCoordinator(restoreSessionToUIIntern
 // 对外暴露的恢复函数（带协调逻辑）
 const restoreSessionToUI = restoreCoordinator.executeRestore;
 
-// 🔧 Codex 修复：watch 只负责模式切换后的恢复（不负责首次恢复）
-// 首次恢复由 onMounted watchEffect 负责，避免双入口冲突
-// 🔧 Step E: 使用 route-computed 代替旧 state
-watch(
-    [isReady, () => routeFunctionMode.value, () => routeBasicSubMode.value, () => routeProSubMode.value],
-    async ([ready]) => {
-        // 🔧 只在已完成首次恢复后才响应模式切换
-        if (!ready || !hasRestoredInitialState.value) return;
-
-        // 🔧 外部数据加载中不响应模式切换（防止 session restore 覆盖外部数据）
-        if (isLoadingExternalData.value) return;
-
-        try {
-            await restoreSessionToUI();
-        } catch (error) {
-            // 🔧 错误处理：避免未处理的 Promise rejection 传播到 Vue
-            console.error('[PromptOptimizerApp] 模式切换后恢复会话失败:', error);
-        }
+const workspaceRouteSwitch = createWorkspaceRouteSwitchController({
+    hasRestoredInitialState,
+    parseSubModeKey,
+    getActiveSubModeKey: sessionManager.getActiveSubModeKey,
+    switchMode: sessionManager.switchMode,
+    switchSubMode: sessionManager.switchSubMode,
+    restoreSessionToUI,
+    onError: (error, fromKey, toKey) => {
+        console.error(`[PromptOptimizerApp] Route switch failed: ${fromKey} -> ${toKey}`, error);
     },
-    { immediate: false }  // 🔧 改为 false，不在 watch 创建时立即执行
-);
+});
 
 // 同步 prompt 变化到 session store
 // 🔧 方案 A 修复：严格限制在 Basic 模式，避免跨模式污染
@@ -1361,34 +1399,6 @@ watch(
             });
         }
     }
-);
-
-// 同步测试结果到 session store
-// 🔧 Codex 修复：Image 模式没有 updateTestResults 方法，需要分支处理
-// 🔧 使用 deep: true 捕获深层变化（如 originalResult += token）
-// 🔧 过滤掉 isTesting* 临时状态，只持久化稳定字段
-// 🔧 修复：移除提前的 same value 检查，让 session store 自己处理（避免初始化时的空对象被跳过）
-watch(
-    () => promptTester.testResults,
-    (newTestResults) => {
-        if (sessionManager.isSwitching) return;
-
-        // 仅 Basic 模式使用 promptTester（其他模式有各自的测试器/工作区）
-        if (routeFunctionMode.value !== 'basic') return;
-
-        // 只保存稳定字段，不保存 isTesting* 临时状态
-        const stableResults = newTestResults
-            ? {
-                  originalResult: newTestResults.originalResult || '',
-                  originalReasoning: newTestResults.originalReasoning || '',
-                  optimizedResult: newTestResults.optimizedResult || '',
-                  optimizedReasoning: newTestResults.optimizedReasoning || '',
-              }
-            : null;
-        // 🔧 直接调用，让 session store 的 updateTestResults 方法自己处理 same value 检查
-        getCurrentBasicSession().updateTestResults(stableResults);
-    },
-    { deep: true }  // 🔧 启用深层监听，捕获 streaming 写入等深层变化
 );
 
 /*
@@ -1587,25 +1597,25 @@ provide("promptHistory", promptHistory);
 
 const historyManager = promptHistory;
 
+let hasRegisteredGlobalHistoryRefresh = false;
+let isAppUnmounted = false;
+const handleGlobalHistoryRefresh = () => {
+    promptHistory.initHistory();
+};
+
 const servicesForHistoryRestore = computed(() =>
     services.value ? { historyManager: services.value.historyManager } : null,
 );
-
-const SUB_MODE_KEYS: ReadonlyArray<SubModeKey> = [
-    "basic-system",
-    "basic-user",
-    "pro-multi",
-    "pro-variable",
-    "image-text2image",
-    "image-image2image",
-];
 
 const navigateToSubModeKeyCompat = (
     toKey: string,
     opts?: { replace?: boolean },
 ) => {
-    if (!SUB_MODE_KEYS.includes(toKey as SubModeKey)) return;
-    navigateToSubModeKey(toKey as SubModeKey, opts);
+    if (!WORKSPACE_SUB_MODE_KEYS.includes(toKey as SubModeKey)) {
+        console.warn(`[PromptOptimizerApp] Invalid workspace sub mode key: ${toKey}`);
+        return Promise.resolve(false);
+    }
+    return navigateToSubModeKey(toKey as SubModeKey, opts).then(() => true);
 };
 
 const optimizerPrompt = computed<string>({
@@ -1614,6 +1624,40 @@ const optimizerPrompt = computed<string>({
         optimizer.prompt = value;
     },
 });
+
+const getSessionBySubModeKey = (targetKey: SubModeKey) => {
+    switch (targetKey) {
+        case 'basic-system': return basicSystemSession;
+        case 'basic-user': return basicUserSession;
+        case 'pro-multi': return proMultiMessageSession;
+        case 'pro-variable': return proVariableSession;
+        case 'image-text2image': return imageText2ImageSession;
+        case 'image-image2image': return imageImage2ImageSession;
+        case 'image-multiimage': return imageMultiImageSession;
+        default: return null;
+    }
+};
+
+const restoreSourceBindingForTargetKey = (
+    targetKey: string,
+    state: { assetBinding?: PromptAssetBinding; origin?: PromptSessionOrigin },
+) => {
+    if (!WORKSPACE_SUB_MODE_KEYS.includes(targetKey as SubModeKey)) return;
+    const session = getSessionBySubModeKey(targetKey as SubModeKey);
+    if (!session) return;
+    if (state.assetBinding || state.origin) {
+        session.updateAssetBinding(state.assetBinding, state.origin);
+    } else {
+        session.clearAssetBinding();
+    }
+};
+
+const saveSessionForTargetKey = async (targetKey: string) => {
+    if (!WORKSPACE_SUB_MODE_KEYS.includes(targetKey as SubModeKey)) return;
+    const session = getSessionBySubModeKey(targetKey as SubModeKey);
+    if (!session?.saveSession) return;
+    await session.saveSession();
+};
 
 // App 级别历史记录恢复
 const { handleHistoryReuse } = useAppHistoryRestore({
@@ -1626,6 +1670,8 @@ const { handleHistoryReuse } = useAppHistoryRestore({
     userWorkspaceRef,
     t,
     isLoadingExternalData,
+    restoreSourceBindingForTargetKey,
+    saveSessionForTargetKey,
 });
 
 // App 级别收藏管理
@@ -1635,7 +1681,6 @@ const {
     saveFavoriteData,
     handleSaveFavorite,
     handleSaveFavoriteComplete,
-    handleFavoriteOptimizePrompt,
     handleUseFavorite,
 } = useAppFavorite({
     navigateToSubModeKey: navigateToSubModeKeyCompat,  // 🔧 Step D: 替代旧的 setFunctionMode/set*SubMode
@@ -1643,6 +1688,70 @@ const {
     optimizerPrompt,
     t,
     isLoadingExternalData,
+    basicSystemSession,
+    basicUserSession,
+    proMultiMessageSession,
+    proVariableSession,
+    imageText2ImageSession,
+    imageImage2ImageSession,
+    imageMultiImageSession,
+    optimizerCurrentVersions,
+    getFavoriteImageStorageService:
+      () => services.value?.favoriteImageStorageService || services.value?.imageStorageService || null,
+    getFavoriteManager: () => services.value?.favoriteManager || null,
+    getCurrentFunctionMode: () => routeFunctionMode.value,
+    getCurrentOptimizationMode: () => selectedOptimizationMode.value,
+    getCurrentImageSubMode: () => routeImageSubMode.value,
+});
+
+const resolveFavoritesReturnPath = () =>
+    resolveWorkspacePathFallback(
+        getCurrentRouteFromWorkspaceQuery(),
+        lastWorkspacePath.value,
+        () => getWorkspacePathFromGlobalSettings(),
+    );
+
+const openFavoritesPage = () => {
+    const fromPath = resolveWorkspacePathFallback(
+        routerInstance.currentRoute.value.path,
+        lastWorkspacePath.value,
+        () => getWorkspacePathFromGlobalSettings(),
+    );
+
+    if (isFavoritesRoute.value && getCurrentRouteFromWorkspaceQuery() === fromPath) {
+        return;
+    }
+
+    void routerInstance.push({
+        name: 'favorites',
+        query: {
+            from: fromPath,
+        },
+    });
+};
+
+const returnToWorkspace = () => {
+    void routerInstance.push(resolveFavoritesReturnPath());
+};
+
+const handleUseFavoriteFromPage = async (
+    favorite: FavoritePrompt,
+    options?: { applyExample?: boolean; exampleId?: string; exampleIndex?: number },
+): Promise<boolean> => {
+    const used = await handleUseFavorite(favorite, options);
+
+    // handleUseFavorite awaits target workspace navigation. This fallback only covers
+    // legacy/non-navigating favorite payloads that still leave the page route active.
+    if (used && routerInstance.currentRoute.value.path === '/favorites') {
+        returnToWorkspace();
+    }
+
+    return used;
+};
+
+provide(favoritesPageActionsKey, {
+    useFavorite: handleUseFavoriteFromPage,
+    returnToWorkspace,
 });
 
 // Optional integrations (feature-flagged + lazy-loaded).
@@ -1657,6 +1766,7 @@ void registerOptionalIntegrations({
     proVariableSession,
     imageText2ImageSession,
     imageImage2ImageSession,
+    imageMultiImageSession,
     getFavoriteManager: () => services.value?.favoriteManager || null,
     getFavoriteImageStorageService:
       () => services.value?.favoriteImageStorageService || services.value?.imageStorageService || null,
@@ -1664,6 +1774,31 @@ void registerOptionalIntegrations({
     optimizerCurrentVersions,
 });
 provide("handleSaveFavorite", handleSaveFavorite);
+
+// 提供 openToolManager 接口（供 Pro 工作区直接调用）
+provide("openToolManager", () => {
+    showToolManager.value = true;
+});
+
+// 提供 openVariableManager 接口（供 Pro 工作区直接调用）
+provide("openVariableManager", (variableName?: string) => {
+    handleOpenVariableManager(variableName);
+});
+
+// 提供 saveToGlobal 接口（供 Pro 工作区将临时变量保存到全局）
+provide("saveToGlobal", (name: string, value: string) => {
+    try {
+        variableManager.addVariable(name, value);
+    } catch (error) {
+        console.error('[PromptOptimizerApp] Failed to save variable to global:', error);
+        throw error;
+    }
+});
+
+// 提供 openPromptPreview 接口（供 Pro 工作区打开提示词预览面板）
+provide("openPromptPreview", () => {
+    showPreviewPanel.value = true;
+});
 
 // 模板管理器
 const templateManagerState = useTemplateManager(services);
@@ -1697,9 +1832,13 @@ const handleTemplateSelected = (
                 return imageText2ImageSession;
             case "image-image2image-optimize":
                 return imageImage2ImageSession;
+            case "image-multiimage-optimize":
+                return imageMultiImageSession;
             case "image-iterate":
                 return routeImageSubMode.value === "image2image"
                     ? imageImage2ImageSession
+                    : routeImageSubMode.value === "multiimage"
+                        ? imageMultiImageSession
                     : imageText2ImageSession;
             default:
                 return null;
@@ -1745,7 +1884,10 @@ const refreshTextModels = async () => {
             await m.ensureInitialized();
         }
         const enabledModels = await manager.getEnabledModels();
-        textModelOptions.value = DataTransformer.modelsToSelectOptions(enabledModels);
+        textModelOptions.value = DataTransformer.modelsToSelectOptions(enabledModels, {
+            getProviderName: (model) => getProviderDisplayName(model.providerMeta, t),
+            getModelName: (model) => getTextModelConfigDisplayName(model, t)
+        });
 
         const availableKeys = new Set(textModelOptions.value.map((opt) => opt.value));
         const fallbackValue = textModelOptions.value[0]?.value || "";
@@ -1786,14 +1928,17 @@ watch(
 
 // 7. 监听服务初始化
 watch(services, async (newServices) => {
+    if (isAppUnmounted) return;
     if (!newServices) return;
 
     promptService.value = newServices.promptService;
     await initializeContextPersistence();
+    if (isAppUnmounted) return;
 
     // 等待基于 globalSettings 的初始路由初始化完成（避免根路径时读取到错误的 routeFunctionMode）
     if (_routeInitInFlight) {
         await _routeInitInFlight;
+        if (isAppUnmounted) return;
     }
 
     // 🔧 修复：使用 setup 顶层保存的 composable 引用，避免在 watch 回调中重复调用（导致 inject() 错误）
@@ -1807,14 +1952,15 @@ watch(services, async (newServices) => {
     } else if (routeFunctionMode.value === "image") {
         await imageSubModeApi.ensureInitialized();
     }
+    if (isAppUnmounted) return;
 
-    const handleGlobalHistoryRefresh = () => {
-        promptHistory.initHistory();
-    };
-    window.addEventListener(
-        "prompt-optimizer:history-refresh",
-        handleGlobalHistoryRefresh,
-    );
+    if (typeof window !== 'undefined' && !hasRegisteredGlobalHistoryRefresh) {
+        window.addEventListener(
+            "prompt-optimizer:history-refresh",
+            handleGlobalHistoryRefresh,
+        );
+        hasRegisteredGlobalHistoryRefresh = true;
+    }
 });
 
 // 8. 处理数据导入成功后的刷新
@@ -1853,20 +1999,19 @@ watch(
     { immediate: false },
 );
 
+const appVersion = `v${rootPackageJson.version}`;
+
+const openOfficialWebsite = async () => {
+    await openExternalUrl("https://always200.com");
+};
+
+const openDocumentationSite = async () => {
+    await openExternalUrl("https://docs.always200.com");
+};
+
 // 打开GitHub仓库
 const openGithubRepo = async () => {
-    const url = "https://github.com/linshenkx/prompt-optimizer";
-
-    if (typeof window !== "undefined" && window.electronAPI?.shell) {
-        try {
-            await window.electronAPI.shell.openExternal(url);
-        } catch (error) {
-            console.error("Failed to open external URL in Electron:", error);
-            window.open(url, "_blank");
-        }
-    } else {
-        window.open(url, "_blank");
-    }
+    await openExternalUrl("https://github.com/linshenkx/prompt-optimizer");
 };
 
 const normalizeTemplateTypeForManager = (
@@ -1889,6 +2034,7 @@ const normalizeTemplateTypeForManager = (
         "iterate",
         "text2imageOptimize",
         "image2imageOptimize",
+        "multiimageOptimize",
         "imageIterate",
         "conversationMessageOptimize",
         "contextUserOptimize",
@@ -1929,6 +2075,8 @@ const handleTemplateLanguageChanged = (_newLanguage: string) => {
     if (typeof window !== "undefined") {
         window.dispatchEvent(new Event("basic-workspace-refresh-templates"));
         window.dispatchEvent(new Event("basic-workspace-refresh-iterate-select"));
+        window.dispatchEvent(new Event("pro-workspace-refresh-templates"));
+        window.dispatchEvent(new Event("image-workspace-refresh-templates"));
         window.dispatchEvent(new Event("image-workspace-refresh-iterate-select"));
     }
 };
@@ -1945,6 +2093,7 @@ const handleTemplateManagerClosed = () => {
     }
     if (typeof window !== "undefined") {
         window.dispatchEvent(new Event("basic-workspace-refresh-templates"));
+        window.dispatchEvent(new Event("pro-workspace-refresh-templates"));
         window.dispatchEvent(new Event("image-workspace-refresh-templates"));
     }
 };
@@ -2035,62 +2184,19 @@ const handleModelManagerClosed = async () => {
 /**
  * 🔧 开发规范（防止回归）：
  *
- * 任何新增触发 switchMode / switchSubMode / restoreSessionToUI 的 watch 或入口
+ * 任何新增通过 watch 触发 switchMode / switchSubMode / restoreSessionToUI 的入口
  * 都**必须**添加以下检查，防止 session restore 覆盖外部数据：
  *
  *   if (isLoadingExternalData.value) return;
  *
+ * 外部数据加载流程如果也需要切换工作区，必须通过 navigateToSubModeKey()
+ * 显式等待同一套路由事务完成，再写入外部数据。
+ *
  * 适用场景：历史记录恢复、收藏加载、模板导入、配置恢复等任何外部数据加载
  *
- * 当前已保护的 5 个入口：
- *   1. watch(functionMode, ...)              - 功能模式切换
- *   2. watch(basicSubMode, ...)              - Basic 子模式切换
- *   3. watch(proSubMode, ...)                - Pro 子模式切换
- *   4. watch(imageSubMode, ...)              - Image 子模式切换
- *   5. watch([isReady, ...modes], ...)       - 综合模式监听
+ * 当前路由切换入口：
+ *   watch(router.currentRoute.fullPath, ...) - 工作区路由切换事务
  */
-
-// ========== 🔧 Step C: 路由驱动的模式切换（替代旧 state-watch） ==========
-/**
- * 从路由路径解析 SubModeKey（使用与 route-computed 相同的严格解析逻辑）
- *
- * @param path - 路由路径，如 '/basic/system', '/pro/variable', '/image/text2image'
- * @returns SubModeKey，如 'basic-system', 'pro-variable', 'image-text2image'
- * @returns null - 如果路径非法
- */
-const parseSubModeKey = (path: string): SubModeKey | null => {
-  if (!path) return null;
-
-  // 移除查询参数和哈希
-  const cleanPath = path.split('?')[0].split('#')[0];
-
-  // 匹配模式：/mode/subMode
-  const match = cleanPath.match(/^\/([a-z]+)\/([a-z0-9]+)$/);
-  if (!match) return null;
-
-  const [, mode, subMode] = match;
-
-  // 严格验证 mode 和 subMode 的合法性
-  const validModes: Record<string, string[]> = {
-    basic: ['system', 'user'],
-    pro: ['multi', 'variable'],
-    image: ['text2image', 'image2image'],
-  };
-
-  // 🔧 Pro 模式兼容性映射（与 routeProSubMode computed 保持一致）
-  let normalizedSubMode = subMode;
-  if (mode === 'pro') {
-    if (subMode === 'system') normalizedSubMode = 'multi';
-    if (subMode === 'user') normalizedSubMode = 'variable';
-  }
-
-  const validSubModes = validModes[mode];
-  if (!validSubModes || !validSubModes.includes(normalizedSubMode)) {
-    return null;
-  }
-
-  return `${mode}-${normalizedSubMode}` as SubModeKey;
-};
 
 /**
  * 🔧 Step C - 新增：路由变化监听（替代旧 state-watch，避免双触发）
@@ -2101,45 +2207,14 @@ const parseSubModeKey = (path: string): SubModeKey | null => {
  * - 路由变化是唯一触发模式切换事务的入口
  * - 使用 route-computed 解析 fromKey/toKey（与 Step A 保持一致）
  * - 保留 isLoadingExternalData 和 hasRestoredInitialState 短路逻辑
- * - 与旧 state-watch 并存但让旧的短路，便于验证和回滚
+ * - 收藏、历史等外部数据加载流程通过 navigateToSubModeKey 显式等待同一事务
  */
 watch(
   () => routerInstance.currentRoute.value.fullPath,
   async (toPath, fromPath) => {
-    // 🔧 首次恢复完成前不响应路由变化
-    if (!hasRestoredInitialState.value) return;
-
-    // 🔧 外部数据加载中不响应路由变化（防止 session restore 覆盖外部数据）
-    if (isLoadingExternalData.value) return;
-
-    // 解析 fromKey 和 toKey（使用与 route-computed 相同的严格解析逻辑）
-    const fromKey = parseSubModeKey(fromPath);
-    const toKey = parseSubModeKey(toPath);
-
-    // 非法路径：不触发切换（由 route-computed 的 redirect 处理）
-    if (!fromKey || !toKey) return;
-
-    // 路由未变化：不触发切换
-    if (fromKey === toKey) return;
-
-    // 🔧 判断是跨 mode 切换还是同 mode 子模式切换
-    const fromMode = fromKey.split('-')[0];
-    const toMode = toKey.split('-')[0];
-
-    try {
-      if (fromMode !== toMode) {
-        // 跨 mode 切换
-        await sessionManager.switchMode(fromKey, toKey);
-      } else {
-        // 同 mode 子模式切换
-        await sessionManager.switchSubMode(fromKey, toKey);
-      }
-
-      // ⚠️ 切换后恢复状态到 UI
-      await restoreSessionToUI();
-    } catch (error) {
-      console.error(`[PromptOptimizerApp] 路由切换失败: ${fromKey} → ${toKey}`, error);
-    }
+    await workspaceRouteSwitch.handleRouteChange(toPath, fromPath, {
+      externalDataLoading: isLoadingExternalData.value,
+    });
   }
 );
 
@@ -2156,7 +2231,7 @@ watch(
  * - 收藏使用：navigateToSubModeKey(favorite.functionMode + '-' + favorite.subMode)
  * - 任何需要切换模式/子模式的场景
  */
-function navigateToSubModeKey(
+async function navigateToSubModeKey(
   toKey: SubModeKey,
   opts?: { replace?: boolean }
 ) {
@@ -2167,12 +2242,15 @@ function navigateToSubModeKey(
   ]
 
   const path = `/${mode}/${subMode}`
+  const fromPath = routerInstance.currentRoute.value.fullPath
 
   if (opts?.replace) {
-    routerInstance.replace(path)
+    await routerInstance.replace(path)
   } else {
-    routerInstance.push(path)
+    await routerInstance.push(path)
   }
+
+  await workspaceRouteSwitch.run(routerInstance.currentRoute.value.fullPath, fromPath)
 }
 
 // 🔧 Step C 阶段2：已删除四个旧 state-watch，route-watch 成为唯一触发源
@@ -2182,7 +2260,7 @@ function navigateToSubModeKey(
 // - watch(imageSubMode, ...) ❌ 已删除（2024-01-06）
 //
 // 主链路：route.fullPath 变化 → sessionManager.switchMode/switchSubMode → restoreSessionToUI
-// 保留 watch([isReady, ...modes], ...) 用于首次恢复（第1121-1131行）
+// 首次恢复由 onMounted watchEffect 负责，后续工作区路由切换由 workspaceRouteSwitch 负责
 
 // 应用启动时恢复当前会话（在services ready后自动触发）
 // 注意：恢复逻辑已集成到services ready的watch中
@@ -2197,7 +2275,7 @@ let initTimeoutId: number | null = null
 const handlePagehide = () => {
   // 注意：这里不能用 await，因为浏览器不会等异步完成
   sessionManager.saveAllSessions().catch(err => {
-    console.error('[PromptOptimizerApp] pagehide 异步保存失败:', err)
+    console.error('[PromptOptimizerApp] Async save failed during pagehide:', err)
   })
 }
 
@@ -2205,9 +2283,13 @@ const handlePagehide = () => {
 const handleVisibilityChange = () => {
   if (document.visibilityState === 'hidden') {
     sessionManager.saveAllSessions().catch(err => {
-      console.error('[PromptOptimizerApp] visibilitychange 保存失败:', err)
+      console.error('[PromptOptimizerApp] Save failed during visibilitychange:', err)
     })
   }
+}
+
+const refreshDataBackupReminder = () => {
+  dataBackupReminderDue.value = isDataBackupReminderDue()
 }
 
 onMounted(() => {
@@ -2215,6 +2297,9 @@ onMounted(() => {
   // Prompt user to refresh instead of auto-reloading.
   if (typeof window !== 'undefined') {
     window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    window.addEventListener(DATA_BACKUP_STATUS_EVENT, refreshDataBackupReminder);
+    window.addEventListener('storage', refreshDataBackupReminder);
+    refreshDataBackupReminder();
   }
   removeRouterErrorHandler = routerInstance.onError((error) => {
     if (!isChunkLoadFailure(error)) return;
@@ -2229,7 +2314,7 @@ onMounted(() => {
 
   // 设置超时定时器
   initTimeoutId = window.setTimeout(() => {
-    console.error('[PromptOptimizerApp] Services 初始化超时')
+    console.error('[PromptOptimizerApp] Timed out while initializing services')
     stopWatch?.()
   }, TIMEOUT)
 
@@ -2243,8 +2328,8 @@ onMounted(() => {
     // 理论上 watch(services) 会先执行 setPiniaServices()，但这里添加二次确认
     const $services = getPiniaServices()
     if (!$services) {
-      console.warn('[PromptOptimizerApp] Pinia services 尚未注入，但 services.value 已存在')
-      console.warn('[PromptOptimizerApp] 这可能是时序问题，继续等待下一轮')
+      console.warn('[PromptOptimizerApp] Pinia services are not injected yet, but services.value already exists')
+      console.warn('[PromptOptimizerApp] This may be a timing issue; waiting for the next cycle')
       // 不调用 stopWatch()，继续等待下一轮
       return
     }
@@ -2254,7 +2339,7 @@ onMounted(() => {
     }
 
     // Services 和 Pinia 均已就绪，清除超时定时器并停止监听
-    console.log('[PromptOptimizerApp] Services 和 Pinia 均已就绪，开始恢复会话')
+    console.log('[PromptOptimizerApp] Services and Pinia are ready; starting session restore')
     if (initTimeoutId !== null) {
       window.clearTimeout(initTimeoutId)
       initTimeoutId = null
@@ -2292,7 +2377,7 @@ onMounted(() => {
         document.addEventListener('visibilitychange', handleVisibilityChange)
       }
     } catch (error) {
-      console.error('[PromptOptimizerApp] 初始化过程中发生错误:', error)
+      console.error('[PromptOptimizerApp] An error occurred during initialization:', error)
     } finally {
       // Ensure the app can render even if session restore fails.
       hasRestoredInitialState.value = true
@@ -2302,6 +2387,8 @@ onMounted(() => {
 
 // 应用卸载前清理并保存所有会话
 onBeforeUnmount(async () => {
+  isAppUnmounted = true;
+
   // 🔧 Codex 修复：设置卸载标志，阻止后续 microtask 执行恢复
   restoreCoordinator.markUnmounted();
 
@@ -2320,6 +2407,15 @@ onBeforeUnmount(async () => {
     window.removeEventListener('pagehide', handlePagehide)
     document.removeEventListener('visibilitychange', handleVisibilityChange)
     window.removeEventListener('unhandledrejection', handleUnhandledRejection)
+    window.removeEventListener(DATA_BACKUP_STATUS_EVENT, refreshDataBackupReminder)
+    window.removeEventListener('storage', refreshDataBackupReminder)
+    if (hasRegisteredGlobalHistoryRefresh) {
+      window.removeEventListener(
+        'prompt-optimizer:history-refresh',
+        handleGlobalHistoryRefresh,
+      )
+      hasRegisteredGlobalHistoryRefresh = false
+    }
   }
 
   removeRouterErrorHandler?.()
@@ -2331,14 +2427,14 @@ onBeforeUnmount(async () => {
 
 <style scoped>
 .active-button {
-    background-color: var(--primary-color, #3b82f6) !important;
-    color: white !important;
-    border-color: var(--primary-color, #3b82f6) !important;
+    background-color: var(--n-primary-color) !important;
+    color: var(--n-text-color-primary) !important;
+    border-color: var(--n-primary-color) !important;
 }
 
 .active-button:hover {
-    background-color: var(--primary-hover-color, #2563eb) !important;
-    border-color: var(--primary-hover-color, #2563eb) !important;
+    background-color: var(--n-primary-color-hover) !important;
+    border-color: var(--n-primary-color-hover) !important;
 }
 
 .loading-container {
@@ -2346,32 +2442,10 @@ onBeforeUnmount(async () => {
     flex-direction: column;
     justify-content: center;
     align-items: center;
+    gap: 12px;
     height: 100vh;
     font-size: 1.2rem;
-    color: var(--text-color);
-    background-color: var(--background-color);
-}
-
-.loading-container.error {
-    color: #f56c6c;
-}
-
-.spinner {
-    border: 4px solid rgba(128, 128, 128, 0.2);
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    border-left-color: var(--primary-color);
-    animation: spin 1s ease infinite;
-    margin-bottom: 20px;
-}
-
-@keyframes spin {
-    0% {
-        transform: rotate(0deg);
-    }
-    100% {
-        transform: rotate(360deg);
-    }
+    color: var(--n-text-color);
+    background-color: var(--n-body-color, var(--n-color));
 }
 </style>

@@ -27,36 +27,43 @@
                             v-if="versions && versions.length > 0"
                             :size="4"
                             class="version-tags"
+                            data-testid="prompt-panel-version-tags"
                         >
                             <!-- V3, V2, V1... 按降序显示（最新版本在前） -->
                             <NTag
                                 v-for="version in versions.slice().reverse()"
-                                :key="version.id"
+                                :key="getVersionTagRenderKey(version)"
                                 :type="
                                     currentVersionId === version.id && !isV0Selected
                                         ? 'success'
                                         : 'default'
                                 "
                                 size="small"
+                                class="version-tag-clickable"
+                                :class="getVersionSourceFeedbackClass(version.version)"
                                 @click="switchVersion(version)"
                                 :bordered="currentVersionId !== version.id || isV0Selected"
+                                :data-testid="`prompt-panel-version-tag-v${version.version}`"
+                                :data-source-feedback-tone="getVersionSourceFeedbackTone(version.version) || undefined"
                             >
                                 V{{ version.version }}
                             </NTag>
                             <!-- 🆕 原始版本固定放在最后 -->
-                            <NTooltip v-if="showV0Tag" trigger="hover">
-                                <template #trigger>
-                                    <NTag
-                                        :type="isV0Selected ? 'success' : 'default'"
-                                        size="small"
-                                        @click="switchToV0"
-                                        :bordered="!isV0Selected"
-                                    >
-                                        {{ t("prompt.originalVersion") }}
-                                    </NTag>
-                                </template>
-                                {{ t("prompt.originalVersionTooltip") }}
-                            </NTooltip>
+                            <ThemedTooltip v-if="showV0Tag" :label="t('prompt.originalVersionTooltip')">
+                                <NTag
+                                    :key="getV0TagRenderKey()"
+                                    :type="isV0Selected ? 'success' : 'default'"
+                                    size="small"
+                                    class="version-tag-clickable"
+                                    :class="getVersionSourceFeedbackClass(0)"
+                                    @click="switchToV0"
+                                    :bordered="!isV0Selected"
+                                    data-testid="prompt-panel-version-tag-v0"
+                                    :data-source-feedback-tone="getVersionSourceFeedbackTone(0) || undefined"
+                                >
+                                    {{ t("prompt.originalVersion") }}
+                                </NTag>
+                            </ThemedTooltip>
                         </NSpace>
                     </NSpace>
                 </NSpace>
@@ -124,8 +131,7 @@
                         {{ t("prompt.applyToConversation") }}
                     </NButton>
                     <!-- 评估入口：分数徽章或评估按钮 -->
-                    <!-- prompt-only 评估（分析功能）不需要 optimizedPrompt -->
-                    <div v-if="showEvaluation && (optimizedPrompt || evaluationType === 'prompt-only')" class="evaluation-entry">
+                    <div v-if="showEvaluation && optimizedPrompt" class="evaluation-entry">
                         <EvaluationScoreBadge
                             v-if="hasEvaluationResult || isEvaluating"
                             :score="evaluationScore"
@@ -133,6 +139,8 @@
                             :loading="isEvaluating"
                             :result="evaluationResult"
                             :type="evaluationType"
+                            :stale="isEvaluationStale"
+                            :stale-message="evaluationStaleMessage"
                             size="small"
                             @show-detail="handleShowEvaluationDetail"
                             @evaluate="handleEvaluate"
@@ -150,21 +158,7 @@
                             @evaluate-with-feedback="handleEvaluateWithFeedback"
                         >
                             <template #icon>
-                                <NIcon>
-                                    <svg
-                                        class="w-4 h-4"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        viewBox="0 0 24 24"
-                                    >
-                                        <path
-                                            stroke-linecap="round"
-                                            stroke-linejoin="round"
-                                            stroke-width="2"
-                                            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
-                                        ></path>
-                                    </svg>
-                                </NIcon>
+                                <AnalyzeActionIcon />
                             </template>
                         </FocusAnalyzeButton>
                     </div>
@@ -187,6 +181,7 @@
                         type="primary"
                         size="small"
                         class="min-w-[100px]"
+                        data-testid="prompt-panel-continue-optimize"
                     >
                         <template #icon>
                             <svg
@@ -240,7 +235,11 @@
         />
     </NFlex>
     <!-- 迭代优化弹窗 -->
-    <Modal v-model="showIterateInput" @confirm="submitIterate">
+    <Modal
+        v-model="showIterateInput"
+        data-testid="prompt-panel-iterate-modal"
+        @confirm="submitIterate"
+    >
         <template #title>
             {{ templateTitleText }}
         </template>
@@ -272,6 +271,7 @@
                     :placeholder="t('prompt.iteratePlaceholder')"
                     :rows="3"
                     :autosize="{ minRows: 3, maxRows: 6 }"
+                    data-testid="prompt-panel-iterate-input"
                 />
             </div>
         </div>
@@ -286,6 +286,7 @@
                 :loading="isIterating"
                 type="primary"
                 size="medium"
+                data-testid="prompt-panel-iterate-submit"
             >
                 {{
                     isIterating
@@ -300,18 +301,30 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { NButton, NText, NInput, NCard, NFlex, NSpace, NTag, NIcon, NTooltip } from "naive-ui";
+import { NButton, NText, NInput, NCard, NFlex, NSpace, NTag, NIcon } from "naive-ui";
+import { useConfirmDialog } from '../composables/ui/useConfirmDialog';
 import { useToast } from '../composables/ui/useToast';
 import { useEvaluationContextOptional } from '../composables/prompt/useEvaluationContext';
 import { useProContextOptional } from '../composables/prompt/useProContext';
 import TemplateSelect from "./TemplateSelect.vue";
 import Modal from "./Modal.vue";
 import OutputDisplay from "./OutputDisplay.vue";
-import { EvaluationScoreBadge, FocusAnalyzeButton } from "./evaluation";
-import type { Template, PromptRecord, EvaluationType, PatchOperation } from "@prompt-optimizer/core";
+import ThemedTooltip from './common/ThemedTooltip.vue';
+import { AnalyzeActionIcon, EvaluationScoreBadge, FocusAnalyzeButton } from "./evaluation";
+import type {
+    EvaluationContentBlock,
+    EvaluationTarget,
+    EvaluationType,
+    PatchOperation,
+    PromptRecord,
+    Template,
+} from "@prompt-optimizer/core";
+
+type SourceFeedbackTone = "change" | "error";
 
 const { t } = useI18n();
 const toast = useToast();
+const confirmDialog = useConfirmDialog();
 
 interface IteratePayload {
     originalPrompt: string;
@@ -353,6 +366,18 @@ const props = defineProps({
         type: String,
         default: "",
     },
+    sourceFeedbackKey: {
+        type: Number,
+        default: 0,
+    },
+    sourceFeedbackTone: {
+        type: String as () => SourceFeedbackTone | null,
+        default: null,
+    },
+    sourceFeedbackVersion: {
+        type: Number as () => number | null,
+        default: null,
+    },
     originalPrompt: {
         type: String,
         default: "",
@@ -375,6 +400,10 @@ const props = defineProps({
         type: Boolean,
         default: false,
     },
+    evaluationTypeOverride: {
+        type: String as () => "prompt-only" | "prompt-iterate" | undefined,
+        default: undefined,
+    },
     showApplyButton: {
         type: Boolean,
         default: false,
@@ -394,11 +423,33 @@ const currentIterationNote = computed(() => {
     return currentVersion?.iterationNote || "";
 });
 
+const getVersionSourceFeedbackTone = (version: number): SourceFeedbackTone | null => {
+    if (!props.sourceFeedbackKey || props.sourceFeedbackVersion !== version) return null;
+    return props.sourceFeedbackTone;
+};
+
+const getVersionSourceFeedbackClass = (version: number) => {
+    const tone = getVersionSourceFeedbackTone(version);
+    return {
+        "version-tag-clickable--source-change": tone === "change",
+        "version-tag-clickable--source-error": tone === "error",
+    };
+};
+
+const getVersionTagRenderKey = (version: PromptRecord) =>
+    `${version.id}:${version.version}:${props.sourceFeedbackVersion === version.version ? props.sourceFeedbackKey : 0}`;
+
+const getV0TagRenderKey = () =>
+    `v0:${props.sourceFeedbackVersion === 0 ? props.sourceFeedbackKey : 0}`;
+
 // 计算评估相关的状态（从 context 获取）
 const showEvaluation = computed(() => !!evaluation);
 
 // 判断当前使用的评估类型：有迭代需求用 prompt-iterate，否则用 prompt-only
 const evaluationType = computed<'prompt-only' | 'prompt-iterate'>(() => {
+    if (props.evaluationTypeOverride) {
+        return props.evaluationTypeOverride;
+    }
     const hasIterateNote = currentIterationNote.value.trim().length > 0;
     return hasIterateNote ? 'prompt-iterate' : 'prompt-only';
 });
@@ -438,6 +489,68 @@ const evaluationResult = computed(() => {
         ? evaluation.state['prompt-iterate'].result
         : evaluation.state['prompt-only'].result;
 });
+
+const promptOnlyEvaluationFingerprint = ref("");
+const promptIterateEvaluationFingerprint = ref("");
+
+const buildEvaluationFingerprint = (
+    type: "prompt-only" | "prompt-iterate",
+): string => {
+    const prompt = (props.optimizedPrompt || "").trim();
+    if (type === "prompt-iterate") {
+        return `${prompt}::${currentIterationNote.value.trim()}`;
+    }
+    return prompt;
+};
+
+const isEvaluationStale = computed(() => {
+    if (!hasEvaluationResult.value) return false;
+
+    const storedFingerprint =
+        evaluationType.value === "prompt-iterate"
+            ? promptIterateEvaluationFingerprint.value
+            : promptOnlyEvaluationFingerprint.value;
+
+    if (!storedFingerprint) return false;
+    return storedFingerprint !== buildEvaluationFingerprint(evaluationType.value);
+});
+
+const evaluationStaleMessage = computed(() =>
+    evaluationType.value === "prompt-iterate"
+        ? t("evaluation.stale.promptIterate")
+        : t("evaluation.stale.promptOnly"),
+);
+
+const buildDesignContextBlock = (): EvaluationContentBlock | undefined => {
+    const context = proContextRef?.value;
+    if (!context) return undefined;
+
+    const content = JSON.stringify(context, null, 2);
+    if (!content.trim()) return undefined;
+
+    return {
+        kind: "json",
+        label: props.advancedModeEnabled
+            ? t("evaluation.designContext.advanced")
+            : t("evaluation.designContext.basic"),
+        content,
+    };
+};
+
+const buildEvaluationTarget = (): EvaluationTarget => {
+    const workspacePrompt = props.optimizedPrompt || "";
+    const referencePrompt = (props.originalPrompt || "").trim();
+    const normalizedWorkspacePrompt = workspacePrompt.trim();
+
+    return {
+        workspacePrompt,
+        referencePrompt:
+            referencePrompt && referencePrompt !== normalizedWorkspacePrompt
+                ? props.originalPrompt
+                : undefined,
+        designContext: buildDesignContextBlock(),
+    };
+};
 
 const emit = defineEmits<{
     "update:optimizedPrompt": [value: string];
@@ -531,7 +644,7 @@ const switchToV0 = async () => {
         outputDisplayRef.value.forceRefreshContent();
     }
 
-    console.log("[PromptPanel] 已切换到 V0（原始内容）");
+    console.log('[PromptPanel] Switched to V0 (original content).');
 };
 
 // 处理评估按钮点击（触发评估）
@@ -552,26 +665,31 @@ const executeEvaluate = async (userFeedback?: string, preferredType?: Evaluation
             ? preferredType
             : evaluationType.value;
 
-    // 获取 Pro 模式上下文（如果可用）
-    const proContext = proContextRef?.value;
+    const target = buildEvaluationTarget();
 
     if (targetType === "prompt-iterate" && iterateRequirement) {
         // 有迭代需求时使用 prompt-iterate 评估
         await evaluation.evaluatePromptIterate({
-            originalPrompt: props.originalPrompt,
-            optimizedPrompt: props.optimizedPrompt,
+            target,
             iterateRequirement,
-            proContext,
-            userFeedback,
+            focus: userFeedback,
         });
+
+        if (evaluation.state["prompt-iterate"].result) {
+            promptIterateEvaluationFingerprint.value =
+                buildEvaluationFingerprint("prompt-iterate");
+        }
     } else {
         // 无迭代需求时使用 prompt-only 评估
         await evaluation.evaluatePromptOnly({
-            originalPrompt: props.originalPrompt,
-            optimizedPrompt: props.optimizedPrompt,
-            proContext,
-            userFeedback,
+            target,
+            focus: userFeedback,
         });
+
+        if (evaluation.state["prompt-only"].result) {
+            promptOnlyEvaluationFingerprint.value =
+                buildEvaluationFingerprint("prompt-only");
+        }
     }
 };
 
@@ -649,18 +767,26 @@ const cancelIterate = () => {
     iterateInput.value = "";
 };
 
-const submitIterate = () => {
-    if (!iterateInput.value.trim()) return;
+const dispatchIterate = (input: string): boolean => {
+    const trimmedInput = input.trim();
+    if (!trimmedInput || props.isIterating) return false;
+
     if (!props.selectedIterateTemplate) {
         toast.error(t("prompt.error.noTemplate"));
-        return;
+        return false;
     }
 
     emit("iterate", {
         originalPrompt: props.originalPrompt,
         optimizedPrompt: outputDisplayRef.value?.content || props.optimizedPrompt,
-        iterateInput: iterateInput.value.trim(),
+        iterateInput: trimmedInput,
     });
+
+    return true;
+};
+
+const submitIterate = () => {
+    if (!dispatchIterate(iterateInput.value)) return;
 
     // 重置输入
     iterateInput.value = "";
@@ -672,7 +798,12 @@ const switchVersion = async (version: PromptRecord) => {
     if (version.id === props.currentVersionId && !isV0Selected.value) return;
 
     if (showSaveChanges.value) {
-        const ok = window.confirm(t("prompt.unsavedChangesConfirm"));
+        const ok = await confirmDialog.warning({
+            title: t("common.warning"),
+            content: t("prompt.unsavedChangesConfirm"),
+            positiveText: t("common.confirm"),
+            negativeText: t("common.cancel"),
+        });
         if (!ok) return;
     }
 
@@ -690,7 +821,7 @@ const switchVersion = async (version: PromptRecord) => {
         outputDisplayRef.value.forceRefreshContent();
     }
 
-    console.log("[PromptPanel] 版本切换完成，强制刷新内容:", {
+    console.log('[PromptPanel] Version switch completed; forcing content refresh:', {
         versionId: version.id,
         version: version.version,
     });
@@ -712,7 +843,7 @@ watch(
             if (outputDisplayRef.value) {
                 outputDisplayRef.value.forceExitEditing();
                 console.log(
-                    "[PromptPanel] 检测到开始优化/迭代，强制退出编辑状态",
+                    '[PromptPanel] Detected optimization/iteration start; forcing the editor to exit editing mode',
                 );
             }
         }
@@ -735,9 +866,19 @@ const openIterateDialog = (input?: string) => {
     showIterateInput.value = true;
 };
 
+const runIterateWithInput = (input: string) => {
+    const started = dispatchIterate(input);
+    if (started) {
+        iterateInput.value = "";
+        showIterateInput.value = false;
+    }
+    return started;
+};
+
 defineExpose({
     refreshIterateTemplateSelect,
     openIterateDialog,
+    runIterateWithInput,
 });
 </script>
 
@@ -762,6 +903,70 @@ defineExpose({
 
 .version-tag-clickable:active {
     transform: translateY(0);
+}
+
+.version-tag-clickable--source-change {
+    animation: prompt-version-source-change-pulse 780ms ease-out;
+}
+
+.version-tag-clickable--source-error {
+    animation: prompt-version-source-error-pulse 860ms ease-out;
+}
+
+@keyframes prompt-version-source-change-pulse {
+    0% {
+        transform: translateY(0) scale(1);
+        filter: brightness(1) saturate(1);
+        box-shadow: 0 0 0 0 currentColor;
+    }
+    24% {
+        transform: translateY(-1px) scale(1.08);
+        filter: brightness(1.08) saturate(1.35);
+        box-shadow:
+            0 0 0 2px currentColor,
+            0 0 0 6px color-mix(in srgb, currentColor 18%, transparent);
+    }
+    62% {
+        transform: translateY(-1px) scale(1.03);
+        filter: brightness(1.04) saturate(1.18);
+        box-shadow:
+            0 0 0 1px currentColor,
+            0 0 0 4px color-mix(in srgb, currentColor 12%, transparent);
+    }
+    100% {
+        transform: translateY(0) scale(1);
+        filter: brightness(1) saturate(1);
+        box-shadow: 0 0 0 0 currentColor;
+    }
+}
+
+@keyframes prompt-version-source-error-pulse {
+    0% {
+        transform: translateX(0);
+        filter: brightness(1) saturate(1);
+        box-shadow: 0 0 0 0 currentColor;
+    }
+    25% {
+        transform: translateX(-2px);
+        filter: brightness(1.1) saturate(1.35);
+    }
+    50% {
+        transform: translateX(2px);
+        filter: brightness(1.1) saturate(1.4);
+        box-shadow:
+            0 0 0 2px currentColor,
+            0 0 0 6px color-mix(in srgb, currentColor 20%, transparent);
+    }
+    70% {
+        box-shadow:
+            0 0 0 1px currentColor,
+            0 0 0 4px color-mix(in srgb, currentColor 12%, transparent);
+    }
+    100% {
+        transform: translateX(0);
+        filter: brightness(1) saturate(1);
+        box-shadow: 0 0 0 0 currentColor;
+    }
 }
 
 @media (max-width: 640px) {

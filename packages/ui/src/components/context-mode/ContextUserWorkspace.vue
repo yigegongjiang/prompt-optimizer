@@ -12,6 +12,14 @@
         - 包含工具管理按钮 (系统模式不包含)
     -->
     <div class="context-user-workspace" data-testid="workspace" data-mode="pro-variable">
+        <div class="workspace-page-tools">
+            <WorkspaceUtilityMenu
+                :disabled="contextUserOptimization.isOptimizing || contextUserOptimization.isIterating || isAnyVariantRunning"
+                :source="resolveSourceAssetRef(proVariableSession.origin, proVariableSession.assetBinding)"
+                test-id="pro-variable-workspace-utility-menu"
+                @clear="handleClearContent"
+            />
+        </div>
         <div
             ref="splitRootRef"
             class="context-user-split"
@@ -25,7 +33,12 @@
                     :style="{ overflow: 'auto', height: '100%', minHeight: 0 }"
                 >
             <!-- 提示词输入面板 (可折叠) -->
-            <NCard style="flex-shrink: 0;">
+            <TestSourceLinkedCard
+                style="flex-shrink: 0;"
+                :feedback-key="sourceAreaFeedback.original.key"
+                :feedback-tone="sourceAreaFeedback.original.tone"
+                :source-tone="sourceAreaFeedback.original.sourceTone"
+            >
                 <!-- 折叠态：只显示标题栏 -->
                 <NFlex
                     v-if="isInputPanelCollapsed"
@@ -93,6 +106,15 @@
                     @add-missing-variable="handleAddMissingVariable"
                 >
                     <!-- 模型选择插槽 -->
+                    <template #model-label-extra>
+                        <TextModelQuickSwitch
+                            :model-key="selectedOptimizeModelKeyModel"
+                            :options="modelSelection.textModelOptions.value"
+                            :refresh-models="modelSelection.refreshTextModels"
+                            :disabled="contextUserOptimization.isOptimizing"
+                        />
+                    </template>
+
                     <template #model-select>
                         <SelectWithConfig
                             v-model="selectedOptimizeModelKeyModel"
@@ -136,7 +158,7 @@
                         </NButton>
                     </template>
                 </InputPanelUI>
-            </NCard>
+            </TestSourceLinkedCard>
 
             <!--
                 用户模式特性说明:
@@ -151,9 +173,12 @@
             -->
 
             <!-- 优化结果面板 -->
-            <NCard
+            <TestSourceLinkedCard
                 style="flex: 1; min-height: 200px; overflow: hidden"
                 content-style="height: 100%; max-height: 100%; overflow: hidden;"
+                :feedback-key="sourceAreaFeedback.workspace.key"
+                :feedback-tone="sourceAreaFeedback.workspace.tone"
+                :source-tone="sourceAreaFeedback.workspace.sourceTone"
             >
                 <PromptPanelUI
                     test-id="pro-variable"
@@ -170,6 +195,9 @@
                     "
                     :versions="contextUserOptimization.currentVersions"
                     :current-version-id="contextUserOptimization.currentVersionId"
+                    :source-feedback-key="sourceAreaFeedback.workspace.key"
+                    :source-feedback-tone="sourceAreaFeedback.workspace.tone"
+                    :source-feedback-version="sourceAreaFeedback.workspace.resolvedVersion"
                       :optimization-mode="optimizationMode"
                        :advanced-mode-enabled="true"
                        :show-preview="true"
@@ -177,12 +205,13 @@
                       @openTemplateManager="handleOpenTemplateManager"
                       @switchVersion="handleSwitchVersion"
                       @switchToV0="handleSwitchToV0"
-                      @save-favorite="emit('save-favorite', $event)"
+                     @save-favorite="handleSaveFavorite"
                      @open-preview="handleOpenPromptPreview"
                      @apply-improvement="handleApplyImprovement"
+                     @apply-patch="handleApplyLocalPatch"
                      @save-local-edit="handleSaveLocalEdit"
                  />
-            </NCard>
+            </TestSourceLinkedCard>
                 </NFlex>
             </div>
 
@@ -211,6 +240,7 @@
                         :global-variables="globalVariables"
                         :predefined-variables="predefinedVariables"
                         :temporary-variables="temporaryVariables"
+                        @open-variable-manager="handleOpenVariableManager"
                         @variable-change="handleTestVariableChange"
                         @save-to-global="handleSaveToGlobalFromTest"
                         @temporary-variable-remove="handleTestVariableRemove"
@@ -247,7 +277,7 @@
                                     {{ t('test.layout.runAll') }}
                                 </NButton>
 
-                                <template v-if="testColumnCountModel === 2 && hasVariantResult('a') && hasVariantResult('b')">
+                                <template v-if="hasCompareCandidates || hasCompareEvaluation">
                                     <EvaluationScoreBadge
                                         v-if="hasCompareEvaluation || isEvaluatingCompare"
                                         :score="compareScore"
@@ -255,6 +285,10 @@
                                         :loading="isEvaluatingCompare"
                                         :result="compareEvaluationResult"
                                         type="compare"
+                                        :stale="isCompareEvaluationStale"
+                                        :stale-message="t('evaluation.stale.compare')"
+                                        :disable-evaluate="!canEvaluateCompare"
+                                        :disable-evaluate-reason="compareDisabledReason"
                                         size="small"
                                         @show-detail="() => showDetail('compare')"
                                         @evaluate="() => handleEvaluate('compare')"
@@ -266,12 +300,27 @@
                                         v-else
                                         type="compare"
                                         :label="t('evaluation.compareEvaluate')"
+                                        :disabled="!canEvaluateCompare"
+                                        :disabled-reason="compareDisabledReason"
                                         :loading="isEvaluatingCompare"
-                                        :button-props="{ size: 'small', quaternary: true }"
+                                        :button-props="{ size: 'small', type: 'tertiary' }"
                                         @evaluate="() => handleEvaluate('compare')"
                                         @evaluate-with-feedback="handleEvaluateWithFeedback"
-                                    />
+                                    >
+                                        <template #icon>
+                                            <AnalyzeActionIcon />
+                                        </template>
+                                    </FocusAnalyzeButton>
                                 </template>
+                                <CompareHelpButton v-if="activeVariantIds.length >= 2" />
+                                <NTag
+                                    v-if="compareToolbarStatus"
+                                    size="small"
+                                    :type="compareToolbarStatus.type"
+                                    :bordered="false"
+                                >
+                                    {{ compareToolbarStatus.label }}
+                                </NTag>
                             </NFlex>
                         </div>
                     </NCard>
@@ -280,62 +329,77 @@
                     <NCard size="small" :style="{ flexShrink: 0 }">
                         <div class="variant-deck" :style="{ gridTemplateColumns: testGridTemplateColumns }">
                             <div v-for="id in activeVariantIds" :key="id" class="variant-cell">
-                                <div class="variant-cell__controls">
-                                    <NTag size="small" :bordered="false" class="variant-cell__label">
-                                        {{ getVariantLabel(id) }}
-                                    </NTag>
-                                    <NTag
-                                        v-if="isVariantStale(id)"
-                                        size="small"
-                                        type="warning"
-                                        :bordered="false"
-                                        class="variant-cell__stale"
-                                    >
-                                        {{ t('test.layout.stale') }}
-                                    </NTag>
-                                    <NSelect
-                                        :value="variantVersionModels[id].value"
-                                        :options="versionOptions"
-                                        size="small"
-                                        :disabled="variantRunning[id] || isAnyVariantRunning"
-                                        :data-testid="getVariantVersionTestId(id)"
-                                        @update:value="(value) => { variantVersionModels[id].value = value }"
-                                        style="width: 92px"
-                                    />
-                                    <div class="variant-cell__model">
-                                        <SelectWithConfig
-                                            :data-testid="getVariantModelTestId(id)"
-                                            :model-value="variantModelKeyModels[id].value"
-                                            @update:model-value="(value) => { variantModelKeyModels[id].value = String(value ?? '') }"
+                                <div
+                                    class="variant-cell__controls"
+                                    :class="{ 'variant-cell__controls--stacked': useStackedVariantControls }"
+                                >
+                                    <div class="variant-cell__meta">
+                                        <TestVariantSourceTag
+                                            class="variant-cell__label"
+                                            :variant-label="getVariantLabel(id)"
+                                            :selection="variantVersionModels[id].value"
+                                            :resolved-version="getVariantResolvedVersion(id)"
+                                            :labels="getTestPanelVersionLabels()"
+                                            :feedback-key="variantSourceFeedback[id].key"
+                                            :feedback-tone="variantSourceFeedback[id].tone"
+                                            @activate="activateVariantSource(id)"
+                                        />
+                                        <CompareRoleBadge
+                                            v-if="activeVariantIds.length >= 2"
+                                            :entry="compareRoleEntryMap[id]"
+                                            clickable
+                                            @click="openCompareRoleConfig"
+                                        />
+                                        <TextModelQuickSwitch
+                                            :model-key="variantModelKeyModels[id].value"
                                             :options="modelSelection.textModelOptions.value"
-                                            :getPrimary="OptionAccessors.getPrimary"
-                                            :getSecondary="OptionAccessors.getSecondary"
-                                            :getValue="OptionAccessors.getValue"
-                                            @config="emit('config-model')"
-                                            style="min-width: 0; width: 100%;"
+                                            :refresh-models="modelSelection.refreshTextModels"
+                                            :disabled="variantRunning[id] || isAnyVariantRunning"
                                         />
                                     </div>
 
-                                    <NTooltip trigger="hover">
-                                        <template #trigger>
-                                            <NButton
-                                                type="primary"
-                                                size="small"
-                                                circle
-                                                :loading="variantRunning[id]"
-                                                :disabled="isAnyVariantRunning && !variantRunning[id]"
-                                                @click="() => runVariant(id)"
-                                                :data-testid="getVariantRunTestId(id)"
-                                            >
-                                                <template #icon>
-                                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-                                                        <path d="M8 5v14l11-7z" />
-                                                    </svg>
-                                                </template>
-                                            </NButton>
-                                        </template>
-                                        {{ t('test.layout.runThisColumn') }}
-                                    </NTooltip>
+                                    <div class="variant-cell__actions">
+                                        <TestPanelVersionSelect
+                                            :value="variantVersionModels[id].value"
+                                            :options="versionOptions"
+                                            :disabled="variantRunning[id] || isAnyVariantRunning"
+                                            :test-id="getVariantVersionTestId(id)"
+                                            @update:value="(value) => handleVariantVersionChange(id, value)"
+                                        />
+                                        <div class="variant-cell__model">
+                                            <SelectWithConfig
+                                                :data-testid="getVariantModelTestId(id)"
+                                                :model-value="variantModelKeyModels[id].value"
+                                                @update:model-value="(value) => { variantModelKeyModels[id].value = String(value ?? '') }"
+                                                :options="modelSelection.textModelOptions.value"
+                                                :getPrimary="OptionAccessors.getPrimary"
+                                                :getSecondary="OptionAccessors.getSecondary"
+                                                :getValue="OptionAccessors.getValue"
+                                                @config="emit('config-model')"
+                                                style="min-width: 0; width: 100%;"
+                                            />
+                                        </div>
+
+                                        <div class="variant-cell__run">
+                                            <ThemedTooltip :label="t('test.layout.runThisColumn')">
+                                                <NButton
+                                                    type="primary"
+                                                    size="small"
+                                                    circle
+                                                    :loading="variantRunning[id]"
+                                                    :disabled="isAnyVariantRunning && !variantRunning[id]"
+                                                    @click="() => runVariant(id)"
+                                                    :data-testid="getVariantRunTestId(id)"
+                                                >
+                                                    <template #icon>
+                                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                                                            <path d="M8 5v14l11-7z" />
+                                                        </svg>
+                                                    </template>
+                                                </NButton>
+                                            </ThemedTooltip>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -366,56 +430,49 @@
                                     :style="{ height: '100%', minHeight: '0' }"
                                 >
                                     <template #toolbar-right-extra>
-                                        <div v-if="id === 'a' && hasVariantResult('a')" class="output-evaluation-entry">
+                                        <div v-if="hasVariantResult(id)" class="output-evaluation-entry">
+                                            <SaveTestResultExampleButton
+                                                sub-mode-key="pro-variable"
+                                                :variant-id="id"
+                                                :content="contextUserOptimization.optimizedPrompt || contextUserOptimization.prompt || ''"
+                                                :original-content="contextUserOptimization.prompt || ''"
+                                                function-mode="context"
+                                                optimization-mode="user"
+                                                :disabled="variantRunning[id]"
+                                                :test-id="`save-test-example-pro-variable-${id}`"
+                                            />
                                             <EvaluationScoreBadge
-                                                v-if="hasOriginalEvaluation || isEvaluatingOriginal"
-                                                :score="originalScore"
-                                                :level="originalScoreLevel"
-                                                :loading="isEvaluatingOriginal"
-                                                :result="originalEvaluationResult"
-                                                type="original"
+                                                v-if="getResultEvaluationProps(id).hasEvaluation || getResultEvaluationProps(id).isEvaluating"
+                                                :score="getResultEvaluationProps(id).score"
+                                                :level="getResultEvaluationProps(id).scoreLevel"
+                                                :loading="getResultEvaluationProps(id).isEvaluating"
+                                                :result="getResultEvaluationProps(id).evaluationResult"
+                                                type="result"
+                                                :stale="isResultEvaluationStale(id)"
+                                                :stale-message="t('evaluation.stale.result')"
+                                                :disable-evaluate="!canEvaluateResult"
                                                 size="small"
-                                                @show-detail="() => showDetail('original')"
-                                                @evaluate="() => handleEvaluate('original')"
-                                                @evaluate-with-feedback="handleEvaluateWithFeedback"
+                                                @show-detail="() => showResultDetail(id)"
+                                                @evaluate="() => handleEvaluateResult(id)"
+                                                @evaluate-with-feedback="handleResultEvaluateWithFeedbackEvent(id, $event)"
                                                 @apply-improvement="handleApplyImprovement"
                                                 @apply-patch="handleApplyLocalPatch"
                                             />
                                             <FocusAnalyzeButton
                                                 v-else
-                                                type="original"
+                                                type="result"
+                                                variant="toolbar"
                                                 :label="t('evaluation.evaluate')"
-                                                :loading="isEvaluatingOriginal"
-                                                :button-props="{ size: 'small', quaternary: true }"
-                                                @evaluate="() => handleEvaluate('original')"
-                                                @evaluate-with-feedback="handleEvaluateWithFeedback"
-                                            />
-                                        </div>
-
-                                        <div v-else-if="id === 'b' && hasVariantResult('b')" class="output-evaluation-entry">
-                                            <EvaluationScoreBadge
-                                                v-if="hasOptimizedEvaluation || isEvaluatingOptimized"
-                                                :score="optimizedScore"
-                                                :level="optimizedScoreLevel"
-                                                :loading="isEvaluatingOptimized"
-                                                :result="optimizedEvaluationResult"
-                                                type="optimized"
-                                                size="small"
-                                                @show-detail="() => showDetail('optimized')"
-                                                @evaluate="() => handleEvaluate('optimized')"
-                                                @evaluate-with-feedback="handleEvaluateWithFeedback"
-                                                @apply-improvement="handleApplyImprovement"
-                                                @apply-patch="handleApplyLocalPatch"
-                                            />
-                                            <FocusAnalyzeButton
-                                                v-else
-                                                type="optimized"
-                                                :label="t('evaluation.evaluate')"
-                                                :loading="isEvaluatingOptimized"
-                                                :button-props="{ size: 'small', quaternary: true }"
-                                                @evaluate="() => handleEvaluate('optimized')"
-                                                @evaluate-with-feedback="handleEvaluateWithFeedback"
-                                            />
+                                                :disabled="!canEvaluateResult"
+                                                :loading="getResultEvaluationProps(id).isEvaluating"
+                                                :button-props="{ size: 'small', quaternary: true, circle: true }"
+                                                @evaluate="() => handleEvaluateResult(id)"
+                                                @evaluate-with-feedback="handleResultEvaluateWithFeedbackEvent(id, $event)"
+                                            >
+                                                <template #icon>
+                                                    <AnalyzeActionIcon />
+                                                </template>
+                                            </FocusAnalyzeButton>
                                         </div>
                                     </template>
                                 </OutputDisplay>
@@ -434,12 +491,27 @@
             :error="panelProps.error"
             :current-type="panelProps.currentType"
             :score-level="panelProps.scoreLevel"
-            @re-evaluate="evaluationHandler.handleReEvaluate"
+            :rewrite-recommendation="panelProps.rewriteRecommendation"
+            :rewrite-reasons="panelProps.rewriteReasons"
+            :stale="activeEvaluationStale"
+            :stale-message="activeEvaluationStaleMessage"
+            :disable-evaluate="activeEvaluationDisableEvaluate"
+            :disable-evaluate-reason="activeEvaluationDisableReason"
+            :can-rewrite-from-evaluation="true"
+            @re-evaluate="handleReEvaluateActive"
             @evaluate-with-feedback="handleEvaluateActiveWithFeedback"
             @apply-local-patch="handleApplyLocalPatch"
             @apply-improvement="handleApplyImprovement"
+            @rewrite-from-evaluation="handleRewriteFromEvaluation"
             @clear="handleClearEvaluation"
-            @retry="evaluationHandler.handleReEvaluate"
+            @retry="handleReEvaluateActive"
+        />
+        <CompareRoleConfigDialog
+            v-model="compareRoleConfig.showDialog.value"
+            :entries="compareRoleConfig.entries.value"
+            :manual-roles="compareRoleConfig.validManualRoles.value"
+            :require-target-selection="compareRoleConfig.requiresExplicitTargetSelection.value"
+            @confirm="handleCompareRoleConfigConfirm"
         />
 
         <!-- 子模式本地预览面板：不再依赖 PromptOptimizerApp 的全局预览状态 -->
@@ -485,17 +557,35 @@
  * ```
  */
 import { ref, reactive, computed, inject, nextTick, watch, onMounted, onUnmounted, toRef, type Ref } from 'vue'
+import { storeToRefs } from 'pinia'
 
 import { useI18n } from "vue-i18n";
-import { NCard, NFlex, NText, NIcon, NButton, NSelect, NRadioGroup, NRadioButton, NTooltip, NTag } from "naive-ui";
+import { NCard, NFlex, NText, NIcon, NButton, NRadioGroup, NRadioButton, NTag } from "naive-ui";
 import { useToast } from "../../composables/ui/useToast";
 import InputPanelUI from "../InputPanel.vue";
 import PromptPanelUI from "../PromptPanel.vue";
 import PromptPreviewPanel from "../PromptPreviewPanel.vue";
 import ContextUserTestPanel from "./ContextUserTestPanel.vue";
 import OutputDisplay from "../OutputDisplay.vue";
+import SaveTestResultExampleButton from '../SaveTestResultExampleButton.vue'
 import SelectWithConfig from "../SelectWithConfig.vue";
-import { EvaluationPanel, EvaluationScoreBadge, FocusAnalyzeButton } from '../evaluation'
+import TextModelQuickSwitch from "../TextModelQuickSwitch.vue";
+import TestPanelVersionSelect from '../TestPanelVersionSelect.vue'
+import TestSourceLinkedCard from '../TestSourceLinkedCard.vue'
+import TestVariantSourceTag from '../TestVariantSourceTag.vue'
+import {
+    AnalyzeActionIcon,
+    CompareHelpButton,
+    CompareRoleBadge,
+    CompareRoleConfigDialog,
+    EvaluationPanel,
+    EvaluationScoreBadge,
+    FocusAnalyzeButton,
+} from '../evaluation'
+import { buildCompareToolbarStatus } from '../evaluation/compare-ui'
+import WorkspaceUtilityMenu from '../common/WorkspaceUtilityMenu.vue'
+import ThemedTooltip from '../common/ThemedTooltip.vue'
+import { resolveSourceAssetRef } from '../../utils/source-asset'
 import {
     applyPatchOperationsToText,
     PREDEFINED_VARIABLES,
@@ -512,12 +602,13 @@ import type { TestAreaPanelInstance } from "../types/test-area";
 import type { IteratePayload, SaveFavoritePayload } from "../../types/workspace";
 import type { AppServices } from '../../types/services';
 import type { VariableManagerHooks } from '../../composables/prompt/useVariableManager';
+import type { PersistedCompareSnapshotRoles } from '../../types/evaluation'
 import { useTemporaryVariables } from "../../composables/variable/useTemporaryVariables";
 import { useLocalPromptPreviewPanel } from '../../composables/prompt/useLocalPromptPreviewPanel'
 import { useVariableAwareInputBridge } from '../../composables/variable/useVariableAwareInputBridge'
 import { useContextUserOptimization } from '../../composables/prompt/useContextUserOptimization';
 import type { ConversationMessage } from '../../types/variable'
-import { useEvaluationHandler, provideEvaluation, provideProContext } from '../../composables/prompt';
+import { useCompareRoleConfig, useEvaluationHandler, provideEvaluation, provideProContext, buildCompareEvaluationPayload, useTestSourceAreaFeedback, useTestVariantSourceFeedback } from '../../composables/prompt';
 import {
     useProVariableSession,
     type TestPanelVersionValue,
@@ -530,6 +621,17 @@ import { useWorkspaceTemplateSelection } from '../../composables/workspaces/useW
 import { OptionAccessors } from '../../utils/data-transformer';
 import { useElementSize } from '@vueuse/core'
 import { buildPromptExecutionContext, hashString, hashVariables } from '../../utils/prompt-variables'
+import { runTasksWithExecutionMode } from '../../utils/runTasksSequentially'
+import {
+    buildTestPanelVersionPromptRef,
+    buildTestPanelVersionOptions,
+    formatTestPanelVersionSelectionLabel,
+    resolveTestPanelVersionSelection,
+} from '../../utils/testPanelVersion'
+import {
+    collectReferencedBusinessVariableNames,
+    formatVariableEvidenceEntries,
+} from '../../utils/evaluationVariableEvidence'
 
 // ========================
 // Props 定义
@@ -654,6 +756,11 @@ const appOpenTemplateManager = inject<((type?: string) => void) | null>(
     null,
 )
 
+// 注入 App 层统一的 Pro 工作区接口
+const appOpenVariableManager = inject<((variableName?: string) => void) | null>('openVariableManager', null)
+const appHandleSaveFavorite = inject<((data: SaveFavoritePayload) => void) | null>('handleSaveFavorite', null)
+const appSaveToGlobal = inject<((name: string, value: string) => void) | null>('saveToGlobal', null)
+
 const handleOpenModelManager = () => {
     if (appOpenModelManager) {
         appOpenModelManager('text')
@@ -670,6 +777,16 @@ const handleOpenTemplateManager = (typeOrPayload?: string | Record<string, unkno
         return
     }
     emit('open-template-manager', type)
+}
+
+const handleSaveFavorite = (data: SaveFavoritePayload) => {
+    if (appHandleSaveFavorite) { appHandleSaveFavorite(data); return; }
+    emit('save-favorite', data)
+}
+
+const handleOpenVariableManager = () => {
+    if (appOpenVariableManager) { appOpenVariableManager(); return; }
+    emit('open-variable-manager')
 }
 
 // ========================
@@ -823,6 +940,7 @@ onUnmounted(() => {
 
     if (typeof window !== 'undefined') {
         window.removeEventListener('pro-workspace-refresh-text-models', refreshTextModelsHandler)
+        window.removeEventListener('pro-workspace-refresh-templates', refreshTemplatesHandler)
     }
 })
 
@@ -916,6 +1034,9 @@ const contextUserOptimization = useContextUserOptimization(
         optimizedReasoning: sessionOptimizedReasoning as unknown as Ref<string>,
         currentChainId: sessionChainId as unknown as Ref<string>,
         currentVersionId: sessionVersionId as unknown as Ref<string>,
+        clearSessionContent: () => proVariableSession.clearContent(),
+        clearAssetBinding: () => proVariableSession.clearAssetBinding(),
+        getSourceBindingSession: () => proVariableSession,
     },
 );
 
@@ -949,17 +1070,17 @@ const variantAVersionModel = computed<TestPanelVersionValue>({
 })
 
 const variantBVersionModel = computed<TestPanelVersionValue>({
-    get: () => getVariant('b')?.version ?? 'latest',
+    get: () => getVariant('b')?.version ?? 'workspace',
     set: (value) => proVariableSession.updateTestVariant('b', { version: value }),
 })
 
 const variantCVersionModel = computed<TestPanelVersionValue>({
-    get: () => getVariant('c')?.version ?? 'latest',
+    get: () => getVariant('c')?.version ?? 'workspace',
     set: (value) => proVariableSession.updateTestVariant('c', { version: value }),
 })
 
 const variantDVersionModel = computed<TestPanelVersionValue>({
-    get: () => getVariant('d')?.version ?? 'latest',
+    get: () => getVariant('d')?.version ?? 'workspace',
     set: (value) => proVariableSession.updateTestVariant('d', { version: value }),
 })
 
@@ -985,6 +1106,7 @@ const variantDModelKeyModel = computed<string>({
 
 const ALL_VARIANT_IDS: TestVariantId[] = ['a', 'b', 'c', 'd']
 const activeVariantIds = computed<TestVariantId[]>(() => ALL_VARIANT_IDS.slice(0, testColumnCountModel.value))
+const useStackedVariantControls = computed(() => activeVariantIds.value.length >= 2)
 
 const variantVersionModels = {
     a: variantAVersionModel,
@@ -1026,51 +1148,37 @@ const testGridTemplateColumns = computed(() => `repeat(${testColumnCountModel.va
 type ResolvedTestPrompt = { text: string; resolvedVersion: number }
 
 const resolveTestPrompt = (selection: TestPanelVersionValue): ResolvedTestPrompt => {
-    const v0 = contextUserOptimization.prompt || ''
-    const versions = contextUserOptimization.currentVersions || []
-    const latest = versions.reduce<{ version: number; optimizedPrompt: string } | null>((acc, v) => {
-        if (typeof v.version !== 'number' || v.version < 1) return acc
-        const next = { version: v.version, optimizedPrompt: v.optimizedPrompt || '' }
-        if (!acc || next.version > acc.version) return next
-        return acc
-    }, null)
+    const resolved = resolveTestPanelVersionSelection({
+        selection,
+        versions: contextUserOptimization.currentVersions || [],
+        currentVersionId: contextUserOptimization.currentVersionId,
+        workspacePrompt: contextUserOptimization.optimizedPrompt || '',
+        originalPrompt: contextUserOptimization.prompt || '',
+    })
 
-    if (selection === 0) {
-        return { text: v0, resolvedVersion: 0 }
+    return {
+        text: resolved.text,
+        resolvedVersion: resolved.resolvedVersion,
     }
-
-    if (selection === 'latest') {
-        if (!latest) return { text: v0, resolvedVersion: 0 }
-        return { text: latest.optimizedPrompt || '', resolvedVersion: latest.version }
-    }
-
-    const target = versions.find(v => v.version === selection)
-    if (target) {
-        return { text: target.optimizedPrompt || '', resolvedVersion: target.version }
-    }
-
-    if (!latest) return { text: v0, resolvedVersion: 0 }
-    return { text: latest.optimizedPrompt || '', resolvedVersion: latest.version }
 }
 
-// 版本选项：仅显示“原始(v0)”与“最新(latest)”，若存在中间版本，则额外显示 v1..v(n-1)。
+const getTestPanelVersionLabels = () => ({
+    workspace: t('test.layout.workspace'),
+    previous: t('test.layout.previous'),
+    original: t('test.layout.original'),
+})
+
+// 版本选项：默认显示“工作区”与“原始(v0)”；存在可用上一版时显示“上一版(vN)”动态别名。
 const versionOptions = computed(() => {
-    const versions = contextUserOptimization.currentVersions || []
-
-    const sortedVersions = versions
-        .map(v => v.version)
-        .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 1)
-        .slice()
-        .sort((a, b) => a - b)
-
-    const latest = sortedVersions.length ? sortedVersions[sortedVersions.length - 1] : null
-    const middle = latest ? sortedVersions.filter(v => v < latest) : []
-
-    return [
-        { label: t('test.layout.original'), value: 0 },
-        ...middle.map(v => ({ label: `v${v}`, value: v })),
-        { label: t('test.layout.latest'), value: 'latest' },
-    ]
+    return buildTestPanelVersionOptions(
+        contextUserOptimization.currentVersions || [],
+        getTestPanelVersionLabels(),
+        {
+            currentVersionId: contextUserOptimization.currentVersionId,
+            workspacePrompt: contextUserOptimization.optimizedPrompt || '',
+            originalPrompt: contextUserOptimization.prompt || '',
+        },
+    )
 })
 
 // 确保测试列的模型选择始终有效（模型列表变化时自动 fallback）
@@ -1098,9 +1206,13 @@ watch(
 const resolvedOriginalTestPrompt = computed(() => resolveTestPrompt(variantAVersionModel.value))
 const resolvedOptimizedTestPrompt = computed(() => resolveTestPrompt(variantBVersionModel.value))
 
-// Pinia setup store 会自动解包 refs，这里是直接可变的响应式对象（非 Ref）
-const variantResults = proVariableSession.testVariantResults
-const variantLastRunFingerprint = proVariableSession.testVariantLastRunFingerprint
+// Pinia setup store 会自动解包 refs。
+// testVariantResults / testVariantLastRunFingerprint 在 restoreSession 时会被整对象替换，
+// 这里必须通过 storeToRefs 持有 Ref，避免组件继续写入旧对象。
+const {
+    testVariantResults: variantResults,
+    testVariantLastRunFingerprint: variantLastRunFingerprint,
+} = storeToRefs(proVariableSession)
 
 const variantRunning = reactive<Record<TestVariantId, boolean>>({
     a: false,
@@ -1109,9 +1221,27 @@ const variantRunning = reactive<Record<TestVariantId, boolean>>({
     d: false,
 })
 
+const { variantSourceFeedback, pulseVariantSource } =
+    useTestVariantSourceFeedback<TestVariantId>(['a', 'b', 'c', 'd'])
+const { sourceAreaFeedback, pulseSourceAreaForSelection } =
+    useTestSourceAreaFeedback()
+
 const isAnyVariantRunning = computed(() => activeVariantIds.value.some((id) => !!variantRunning[id]))
 
 const getVariantLabel = (id: TestVariantId) => ({ a: 'A', b: 'B', c: 'C', d: 'D' }[id])
+
+const handleVariantVersionChange = (id: TestVariantId, value: string | number) => {
+    const selection = value as TestPanelVersionValue
+    variantVersionModels[id].value = selection
+    activateVariantSource(id)
+}
+
+const activateVariantSource = (id: TestVariantId) => {
+    const selection = variantVersionModels[id].value
+    const resolved = resolveTestPrompt(selection)
+    pulseVariantSource(id, 'change')
+    pulseSourceAreaForSelection(selection, resolved.resolvedVersion, 'change')
+}
 
 const getVariantVersionTestId = (id: TestVariantId) => {
     if (id === 'a') return 'pro-variable-test-original-version-select'
@@ -1133,8 +1263,8 @@ const getVariantOutputTestId = (id: TestVariantId) => {
     return `pro-variable-test-variant-${id}-output`
 }
 
-const getVariantResult = (id: TestVariantId) => variantResults[id]
-const hasVariantResult = (id: TestVariantId) => !!(variantResults[id]?.result || '').trim()
+const getVariantResult = (id: TestVariantId) => variantResults.value[id]
+const hasVariantResult = (id: TestVariantId) => !!(variantResults.value[id]?.result || '').trim()
 
 const getVariantFingerprint = (id: TestVariantId) => {
     const selection = variantVersionModels[id].value
@@ -1154,10 +1284,73 @@ const getVariantFingerprint = (id: TestVariantId) => {
 
 const isVariantStale = (id: TestVariantId) => {
     if (!hasVariantResult(id)) return false
-    const prev = variantLastRunFingerprint[id]
+    const prev = variantLastRunFingerprint.value[id]
     if (!prev) return false
     return prev !== getVariantFingerprint(id)
 }
+
+const getVariantVersionLabel = (id: TestVariantId): string => {
+    const selection = variantVersionModels[id].value
+    const resolved = resolveTestPrompt(selection)
+    return formatTestPanelVersionSelectionLabel(
+        selection,
+        resolved.resolvedVersion,
+        getTestPanelVersionLabels(),
+    )
+}
+
+const getVariantResolvedVersion = (id: TestVariantId): number =>
+    resolveTestPrompt(variantVersionModels[id].value).resolvedVersion
+
+const compareReadyVariantIds = computed(() =>
+    activeVariantIds.value.filter((id) => hasVariantResult(id) && !isVariantStale(id))
+)
+
+const hasCompareCandidates = computed(() => compareReadyVariantIds.value.length >= 2)
+const compareRoleCandidates = computed(() =>
+    activeVariantIds.value.map((id) => ({
+        id,
+        label: getVariantLabel(id),
+        promptRef: buildVariantPromptRef(id),
+        promptText: resolveTestPrompt(variantVersionModels[id].value).text,
+        modelKey: variantModelKeyModels[id].value,
+        versionLabel: getVariantVersionLabel(id),
+    }))
+)
+const compareRoleConfig = useCompareRoleConfig({
+    candidates: compareRoleCandidates,
+    persistedRoles: toRef(proVariableSession, 'compareSnapshotRoles'),
+    persistedRoleSignatures: toRef(proVariableSession, 'compareSnapshotRoleSignatures'),
+    persistRoles: (roles, signatures) => proVariableSession.updateCompareSnapshotRoles(roles, signatures),
+})
+const compareRoleEntryMap = computed(() =>
+    Object.fromEntries(compareRoleConfig.entries.value.map((entry) => [entry.id, entry]))
+)
+const compareToolbarStatus = computed(() =>
+    activeVariantIds.value.length >= 2
+        ? buildCompareToolbarStatus(
+            t,
+            compareRoleConfig.requiresExplicitTargetSelection.value,
+            compareRoleConfig.requiresManualRoleReview.value,
+        )
+        : null
+)
+const resultEvaluationFingerprint = reactive<Record<TestVariantId, string>>({
+    a: '',
+    b: '',
+    c: '',
+    d: '',
+})
+const compareEvaluationFingerprint = ref('')
+
+const buildCompareEvaluationFingerprint = () =>
+    compareReadyVariantIds.value
+        .map((id) => `${id}:${getVariantFingerprint(id)}`)
+        .join('|')
+
+const hasWorkspaceCompareCandidate = computed(() =>
+    compareReadyVariantIds.value.some((id) => buildVariantPromptRef(id).kind === 'workspace')
+)
 
 type VariantTestInput = {
     userPrompt: string
@@ -1175,8 +1368,14 @@ const getVariantTestInput = (id: TestVariantId): VariantTestInput | null => {
     const resolved = resolveTestPrompt(variantVersionModels[id].value)
     const userPrompt = (resolved.text || '').trim()
     if (!userPrompt) {
-        const key = resolved.resolvedVersion === 0 ? 'test.error.noOriginalPrompt' : 'test.error.noOptimizedPrompt'
+        const key = variantVersionModels[id].value === 'workspace'
+            ? 'test.error.noWorkspacePrompt'
+            : resolved.resolvedVersion === 0
+                ? 'test.error.noOriginalPrompt'
+                : 'test.error.noOptimizedPrompt'
         toast.error(t(key))
+        pulseVariantSource(id, 'error')
+        pulseSourceAreaForSelection(variantVersionModels[id].value, resolved.resolvedVersion, 'error')
         return null
     }
 
@@ -1229,7 +1428,7 @@ const runVariant = async (
         evaluationHandler.clearBeforeTest()
     }
 
-    variantResults[id] = { result: '', reasoning: '' }
+    variantResults.value[id] = { result: '', reasoning: '' }
     variantRunning[id] = true
 
     try {
@@ -1246,12 +1445,12 @@ const runVariant = async (
             },
             {
                 onToken: (token: string) => {
-                    const prev = variantResults[id]
-                    variantResults[id] = { ...prev, result: (prev.result || '') + token }
+                    const prev = variantResults.value[id]
+                    variantResults.value[id] = { ...prev, result: (prev.result || '') + token }
                 },
                 onReasoningToken: (token: string) => {
-                    const prev = variantResults[id]
-                    variantResults[id] = { ...prev, reasoning: (prev.reasoning || '') + token }
+                    const prev = variantResults.value[id]
+                    variantResults.value[id] = { ...prev, reasoning: (prev.reasoning || '') + token }
                 },
                 onComplete: () => {
                     // 由 finally 统一收尾
@@ -1273,7 +1472,7 @@ const runVariant = async (
         return false
     } finally {
         variantRunning[id] = false
-        variantLastRunFingerprint[id] = getVariantFingerprint(id)
+        variantLastRunFingerprint.value[id] = getVariantFingerprint(id)
         if (opts?.persist !== false) {
             void proVariableSession.saveSession()
         }
@@ -1289,16 +1488,16 @@ const runAllVariants = async () => {
     }
 
     evaluationHandler.clearBeforeTest()
-    const results = await Promise.all(
-        ids.map((id) =>
+    const results = await runTasksWithExecutionMode(
+        ids,
+        async (id) =>
             runVariant(id, {
                 silentSuccess: true,
                 silentError: true,
                 skipClearEvaluation: true,
-                persist: false,
                 allowParallel: true,
+                persist: false,
             }),
-        ),
     )
 
     void proVariableSession.saveSession()
@@ -1321,95 +1520,237 @@ const refreshTextModelsHandler = async () => {
     }
 }
 
+const refreshTemplatesHandler = async () => {
+    try {
+        await templateSelection.refreshOptimizeTemplates()
+        await templateSelection.refreshIterateTemplates()
+    } catch (e) {
+        console.warn('[ContextUserWorkspace] Failed to refresh templates after template manager update:', e)
+    }
+}
+
 onMounted(() => {
     // ✅ 刷新模型列表
     void refreshTextModelsHandler()
 
     if (typeof window !== 'undefined') {
         window.addEventListener('pro-workspace-refresh-text-models', refreshTextModelsHandler)
+        window.addEventListener('pro-workspace-refresh-templates', refreshTemplatesHandler)
     }
 });
 
-const proContext = computed<ProUserEvaluationContext | undefined>(() => {
-    const tempVars = temporaryVariables.value;
-    const globalVars = globalVariables.value;
-    const predefinedVars = predefinedVariables.value;
-    const rawPrompt = resolvedOriginalTestPrompt.value.text;
-    const resolvedPrompt = resolvedOptimizedTestPrompt.value.text;
-
-    // 扫描提示词中实际使用的变量名
-    // 同时扫描原始提示词和优化后的提示词，确保覆盖所有使用的变量
+const collectUsedVariableNames = (...prompts: string[]) => {
     const usedVarNames = new Set<string>();
 
-    // 使用 variableManager 扫描变量
     if (variableManager?.variableManager.value) {
         const vm = variableManager.variableManager.value;
-        // 扫描原始提示词中的变量
-        if (rawPrompt) {
-            vm.scanVariablesInContent(rawPrompt).forEach(name => usedVarNames.add(name));
-        }
-        // 扫描优化后提示词中的变量
-        if (resolvedPrompt) {
-            vm.scanVariablesInContent(resolvedPrompt).forEach(name => usedVarNames.add(name));
-        }
-    } else {
-        // 回退方案：使用正则表达式扫描 {{varName}} 格式的变量
-        // 允许两侧空格，但变量名内部不允许空白（支持中文等 Unicode 变量名）
-        const varPattern = /\{\{\s*([^{}\s]+)\s*\}\}/gu;
-        let match;
-        if (rawPrompt) {
-          while ((match = varPattern.exec(rawPrompt)) !== null) {
-            const name = match[1]?.trim();
-            if (name) usedVarNames.add(name);
-          }
-        }
-        if (resolvedPrompt) {
-          varPattern.lastIndex = 0; // 重置正则表达式
-          while ((match = varPattern.exec(resolvedPrompt)) !== null) {
-            const name = match[1]?.trim();
-            if (name) usedVarNames.add(name);
-          }
-        }
+        prompts.forEach((prompt) => {
+            if (!prompt) return;
+            vm.scanVariablesInContent(prompt).forEach((name) => usedVarNames.add(name));
+        });
+        return usedVarNames;
     }
 
-    // 只收集实际使用的变量
-    const usedVariables: ProUserEvaluationContext['variables'] = [];
-
-    // 按优先级顺序添加变量（预定义 > 临时 > 全局）
-    usedVarNames.forEach(name => {
-        // 预定义变量优先级最高（保留名不可被覆盖）
-        if (predefinedVars[name] !== undefined) {
-            usedVariables.push({ name, value: predefinedVars[name], source: 'predefined' });
-        }
-        // 其次是临时变量
-        else if (tempVars[name] !== undefined) {
-            usedVariables.push({ name, value: tempVars[name], source: 'temporary' });
-        }
-        // 最后是全局变量
-        else if (globalVars[name] !== undefined) {
-            usedVariables.push({ name, value: globalVars[name], source: 'global' });
-        }
-        // 变量未定义时仍然记录，标记为临时变量但值为空
-        else {
-            usedVariables.push({ name, value: '', source: 'temporary' });
+    const varPattern = /\{\{\s*([^{}\s]+)\s*\}\}/gu;
+    prompts.forEach((prompt) => {
+        if (!prompt) return;
+        varPattern.lastIndex = 0;
+        let match;
+        while ((match = varPattern.exec(prompt)) !== null) {
+            const name = match[1]?.trim();
+            if (name) usedVarNames.add(name);
         }
     });
 
+    return usedVarNames;
+};
+
+const buildUsedVariables = (
+    names: Set<string>,
+    options?: {
+        includeValues?: boolean
+        predefinedOverrides?: Record<string, string>
+    },
+): ProUserEvaluationContext['variables'] => {
+    const includeValues = options?.includeValues ?? true;
+    const predefinedOverrides = options?.predefinedOverrides || {};
+    const tempVars = temporaryVariables.value;
+    const globalVars = globalVariables.value;
+    const predefinedVars = predefinedVariables.value;
+    const usedVariables: ProUserEvaluationContext['variables'] = [];
+
+    names.forEach((name) => {
+        if (predefinedVars[name] !== undefined || predefinedOverrides[name] !== undefined) {
+            usedVariables.push({
+                name,
+                value: includeValues
+                    ? (predefinedOverrides[name] ?? predefinedVars[name] ?? '')
+                    : undefined,
+                source: 'predefined',
+            });
+        } else if (tempVars[name] !== undefined) {
+            usedVariables.push({
+                name,
+                value: includeValues ? tempVars[name] : undefined,
+                source: 'temporary',
+            });
+        } else if (globalVars[name] !== undefined) {
+            usedVariables.push({
+                name,
+                value: includeValues ? globalVars[name] : undefined,
+                source: 'global',
+            });
+        } else {
+            usedVariables.push({
+                name,
+                value: includeValues ? '' : undefined,
+                source: 'temporary',
+            });
+        }
+    });
+
+    return usedVariables;
+};
+
+const analysisProContext = computed<ProUserEvaluationContext | undefined>(() => {
+    const currentWorkspacePrompt = contextUserOptimization.optimizedPrompt || '';
+    const usedVarNames = collectUsedVariableNames(currentWorkspacePrompt);
+
     return {
-        variables: usedVariables,
+        variables: buildUsedVariables(usedVarNames, { includeValues: false }),
+        rawPrompt: currentWorkspacePrompt,
+    };
+});
+
+const formatVariableEntries = (
+    variables: ProUserEvaluationContext['variables'],
+): string => variables
+    .map((variable) => `${variable.name}=${String(variable.value ?? '')}`)
+    .join('\n');
+
+const proContext = computed<ProUserEvaluationContext | undefined>(() => {
+    const rawPrompt = resolvedOriginalTestPrompt.value.text;
+    const resolvedPrompt = resolvedOptimizedTestPrompt.value.text;
+    const usedVarNames = collectUsedVariableNames(rawPrompt, resolvedPrompt);
+
+    return {
+        variables: buildUsedVariables(usedVarNames, { includeValues: true }),
         rawPrompt: rawPrompt,
         resolvedPrompt: resolvedPrompt,
     };
 });
 
-// 🆕 提供 Pro 模式上下文给子组件（如 PromptPanel），用于评估时传递变量解析上下文
-provideProContext(proContext);
+// 左侧分析只提供变量结构，不注入右侧测试值
+provideProContext(analysisProContext);
 
-// 🆕 测试结果数据
-const testResultsData = computed(() => ({
-    originalResult: variantResults.a.result || undefined,
-    optimizedResult: variantResults.b.result || undefined,
-}));
+const buildEvaluationTarget = () => {
+    const workspacePrompt = contextUserOptimization.optimizedPrompt || '';
+    const referencePrompt = (contextUserOptimization.prompt || '').trim();
+    const normalizedWorkspacePrompt = workspacePrompt.trim();
+
+    return {
+        workspacePrompt,
+        referencePrompt:
+            referencePrompt && referencePrompt !== normalizedWorkspacePrompt
+                ? contextUserOptimization.prompt
+                : undefined,
+    };
+};
+
+const buildVariantPromptRef = (id: TestVariantId) => {
+    const selection = variantVersionModels[id].value;
+    const resolved = resolveTestPanelVersionSelection({
+        selection,
+        versions: contextUserOptimization.currentVersions || [],
+        currentVersionId: contextUserOptimization.currentVersionId,
+        workspacePrompt: contextUserOptimization.optimizedPrompt || '',
+        originalPrompt: contextUserOptimization.prompt || '',
+    });
+    return buildTestPanelVersionPromptRef(resolved, getTestPanelVersionLabels());
+};
+
+const buildResultVariableInputVariables = (
+    id: TestVariantId,
+): ProUserEvaluationContext['variables'] => {
+    const promptText = resolveTestPrompt(variantVersionModels[id].value).text
+    const relevantNames = new Set(collectReferencedBusinessVariableNames(promptText))
+    return buildUsedVariables(relevantNames, { includeValues: true })
+}
+
+const buildResultVariableTestCaseContent = (id: TestVariantId): string =>
+    formatVariableEvidenceEntries(
+        buildResultVariableInputVariables(id),
+        t('evaluation.syntheticInput.noExplicitVariables'),
+    )
+
+const buildCompareVariableInputVariables = (): ProUserEvaluationContext['variables'] => {
+    const relevantNames = new Set<string>();
+    const collectRelevantNames = (promptText: string) => {
+        collectReferencedBusinessVariableNames(promptText).forEach((name) => {
+            relevantNames.add(name);
+        });
+    };
+
+    compareReadyVariantIds.value.forEach((id) => {
+        collectRelevantNames(resolveTestPrompt(variantVersionModels[id].value).text);
+    });
+
+    if (!relevantNames.size) {
+        collectRelevantNames(buildEvaluationTarget().workspacePrompt);
+    }
+
+    return buildUsedVariables(relevantNames, { includeValues: true });
+};
+
+const buildSharedVariableTestCaseDraft = () => {
+    const variables = buildCompareVariableInputVariables();
+
+    return {
+        id: 'shared-variable-test-case',
+        label: t('variables.management.variables'),
+        input: {
+            kind: 'variables' as const,
+            label: t('variables.management.variables'),
+            content: variables.length
+                ? formatVariableEntries(variables)
+                : t('evaluation.syntheticInput.noExplicitVariables'),
+        },
+    };
+};
+
+const comparePayload = computed(() =>
+    buildCompareEvaluationPayload({
+        target: buildEvaluationTarget(),
+        testCases: [buildSharedVariableTestCaseDraft()],
+        snapshotRolesOverride: compareRoleConfig.validManualRoles.value,
+        snapshots: compareReadyVariantIds.value.map((id) => ({
+            id,
+            label: getVariantLabel(id),
+            testCaseId: 'shared-variable-test-case',
+            promptRef: buildVariantPromptRef(id),
+            promptText: resolveTestPrompt(variantVersionModels[id].value).text,
+            output: variantResults.value[id]?.result || '',
+            reasoning: variantResults.value[id]?.reasoning || '',
+            modelKey: variantModelKeyModels[id].value,
+            versionLabel: getVariantVersionLabel(id),
+        })),
+    }),
+);
+
+const hasEvaluationWorkspacePrompt = computed(() => !!contextUserOptimization.optimizedPrompt.trim())
+const canEvaluateResult = computed(() => hasEvaluationWorkspacePrompt.value)
+const canEvaluateCompare = computed(() => !!comparePayload.value)
+const compareDisabledReason = computed(() => {
+    if (canEvaluateCompare.value) {
+        return ''
+    }
+
+    if ((hasCompareCandidates.value || hasCompareEvaluation.value) && !hasWorkspaceCompareCandidate.value) {
+        return t('evaluation.compareUnavailable.missingWorkspace')
+    }
+
+    return ''
+})
 
 // 🆕 计算当前迭代需求（用于 prompt-iterate 的 re-evaluate）
 const currentIterateRequirement = computed(() => {
@@ -1420,17 +1761,49 @@ const currentIterateRequirement = computed(() => {
     return currentVersion?.iterationNote || '';
 });
 
+const resultEvaluationTargets = computed(() =>
+    Object.fromEntries(
+        activeVariantIds.value.map((id) => [
+            id,
+            {
+                variantId: id,
+                target: buildEvaluationTarget(),
+                testCase: {
+                    id: `${id}-variable-test-case`,
+                    label: t('variables.management.variables'),
+                    input: {
+                        kind: 'variables' as const,
+                        label: t('variables.management.variables'),
+                        content: buildResultVariableTestCaseContent(id),
+                    },
+                },
+                snapshot: {
+                    id,
+                    label: getVariantLabel(id),
+                    testCaseId: `${id}-variable-test-case`,
+                    promptRef: buildVariantPromptRef(id),
+                    promptText: resolveTestPrompt(variantVersionModels[id].value).text,
+                    output: variantResults.value[id]?.result || '',
+                    reasoning: variantResults.value[id]?.reasoning || '',
+                    modelKey: variantModelKeyModels[id].value || undefined,
+                    versionLabel: getVariantVersionLabel(id),
+                },
+            },
+        ]),
+    ),
+)
+
 // 🆕 初始化评估处理器（使用全局 evaluation 实例，避免双套状态）
 const evaluationHandler = useEvaluationHandler({
     services: servicesRef,
-    originalPrompt: computed(() => resolvedOriginalTestPrompt.value.text),
-    optimizedPrompt: computed(() => resolvedOptimizedTestPrompt.value.text),
-    testContent: computed(() => ''), // 变量模式不需要单独的测试内容，通过变量系统管理
-    testResults: testResultsData,
+    analysisOptimizedPrompt: computed(() => contextUserOptimization.optimizedPrompt || ''),
+    resultTargets: resultEvaluationTargets,
     evaluationModelKey: effectiveEvaluationModelKey,
     functionMode: computed(() => 'pro'),
     subMode: computed(() => 'variable'),
     proContext,
+    analysisContext: analysisProContext,
+    comparePayload,
     currentIterateRequirement,
     persistedResults: toRef(proVariableSession, 'evaluationResults'),
 });
@@ -1438,19 +1811,8 @@ const evaluationHandler = useEvaluationHandler({
 provideEvaluation(evaluationHandler.evaluation)
 
 const { evaluation, handleEvaluate: handleEvaluateInternal } = evaluationHandler
-const testAreaProps = evaluationHandler.testAreaEvaluationProps
 const panelProps = evaluationHandler.panelProps
-
-const isEvaluatingOriginal = computed(() => testAreaProps.value.isEvaluatingOriginal)
-const isEvaluatingOptimized = computed(() => testAreaProps.value.isEvaluatingOptimized)
-const originalScore = computed(() => testAreaProps.value.originalScore ?? 0)
-const optimizedScore = computed(() => testAreaProps.value.optimizedScore ?? 0)
-const hasOriginalEvaluation = computed(() => testAreaProps.value.hasOriginalEvaluation)
-const hasOptimizedEvaluation = computed(() => testAreaProps.value.hasOptimizedEvaluation)
-const originalEvaluationResult = computed(() => testAreaProps.value.originalEvaluationResult)
-const optimizedEvaluationResult = computed(() => testAreaProps.value.optimizedEvaluationResult)
-const originalScoreLevel = computed(() => testAreaProps.value.originalScoreLevel)
-const optimizedScoreLevel = computed(() => testAreaProps.value.optimizedScoreLevel)
+const getResultEvaluationProps = (variantId: string) => evaluationHandler.getResultEvaluationProps(variantId)
 
 // 对比评估状态
 const isEvaluatingCompare = evaluationHandler.compareEvaluation.isEvaluatingCompare
@@ -1460,24 +1822,210 @@ const compareEvaluationResult = computed(() => evaluation.state['compare'].resul
 const compareScoreLevel = computed(() =>
     evaluation.getScoreLevel(evaluationHandler.compareEvaluation.compareScore.value ?? null)
 )
+const activeEvaluationStale = computed(() => {
+    if (panelProps.value.currentType === 'compare') {
+        return isCompareEvaluationStale.value
+    }
 
-const handleEvaluate = async (type: 'original' | 'optimized' | 'compare') => {
+    if (
+        panelProps.value.currentType === 'result'
+        && panelProps.value.currentVariantId
+        && panelProps.value.currentVariantId in resultEvaluationFingerprint
+    ) {
+        return isResultEvaluationStale(panelProps.value.currentVariantId as TestVariantId)
+    }
+
+    return false
+})
+const activeEvaluationStaleMessage = computed(() => {
+    if (panelProps.value.currentType === 'compare') {
+        return t('evaluation.stale.compare')
+    }
+
+    if (panelProps.value.currentType === 'result') {
+        return t('evaluation.stale.result')
+    }
+
+    return t('evaluation.stale.default')
+})
+const activeEvaluationDisableEvaluate = computed(() => {
+    if (panelProps.value.currentType === 'compare') {
+        return !canEvaluateCompare.value
+    }
+
+    if (panelProps.value.currentType === 'result') {
+        return !canEvaluateResult.value
+    }
+
+    return false
+})
+const activeEvaluationDisableReason = computed(() => {
+    if (panelProps.value.currentType === 'compare') {
+        return compareDisabledReason.value
+    }
+
+    return ''
+})
+
+const ensureEvaluationWorkspaceReady = (): boolean => {
+    if (!hasEvaluationWorkspacePrompt.value) {
+        toast.error(t('test.error.noWorkspacePrompt'))
+        return false
+    }
+
+    return true
+}
+
+const ensureCompareEvaluationReady = (): boolean => {
+    if (!ensureEvaluationWorkspaceReady()) {
+        return false
+    }
+
+  if (!comparePayload.value) {
+    return false
+  }
+
+  if (
+    compareRoleConfig.requiresExplicitTargetSelection.value ||
+    compareRoleConfig.requiresManualRoleReview.value
+  ) {
+    compareRoleConfig.openDialog({ runCompareAfterConfirm: true })
+    return false
+  }
+
+    return true
+}
+
+const isResultEvaluationStale = (id: TestVariantId) => {
+    const props = getResultEvaluationProps(id)
+    if (!props.hasEvaluation) return false
+
+    const storedFingerprint = resultEvaluationFingerprint[id]
+    if (!storedFingerprint) return false
+
+    return storedFingerprint !== getVariantFingerprint(id)
+}
+
+const isCompareEvaluationStale = computed(() => {
+    if (!hasCompareEvaluation.value) return false
+    if (!compareEvaluationFingerprint.value) return false
+    return compareEvaluationFingerprint.value !== buildCompareEvaluationFingerprint()
+})
+
+const handleEvaluateResult = async (variantId: string) => {
+    if (!ensureEvaluationWorkspaceReady()) return
+
+    await handleEvaluateInternal('result', { variantId })
+
+    if (evaluation.state.result[variantId]?.result && variantId in resultEvaluationFingerprint) {
+        resultEvaluationFingerprint[variantId as TestVariantId] = getVariantFingerprint(variantId as TestVariantId)
+    }
+}
+
+const handleResultEvaluateWithFeedback = async (variantId: string, feedback: string) => {
+    if (!ensureEvaluationWorkspaceReady()) return
+
+    await evaluationHandler.handleEvaluateWithFeedback('result', feedback, { variantId })
+
+    if (evaluation.state.result[variantId]?.result && variantId in resultEvaluationFingerprint) {
+        resultEvaluationFingerprint[variantId as TestVariantId] = getVariantFingerprint(variantId as TestVariantId)
+    }
+}
+
+const handleResultEvaluateWithFeedbackEvent = async (
+    variantId: string,
+    payload: { feedback: string },
+) => {
+    await handleResultEvaluateWithFeedback(variantId, payload.feedback)
+}
+
+const handleEvaluate = async (type: 'compare') => {
+    if (!ensureCompareEvaluationReady()) return
+
     await handleEvaluateInternal(type)
+
+    if (evaluation.state.compare.result) {
+        compareEvaluationFingerprint.value = buildCompareEvaluationFingerprint()
+    }
 }
 
 const handleEvaluateWithFeedback = async (payload: {
     type: EvaluationType
     feedback: string
 }) => {
+    if (payload.type === 'compare' && !ensureCompareEvaluationReady()) {
+        return
+    }
+
     await evaluationHandler.handleEvaluateWithFeedback(payload.type, payload.feedback)
+
+    if (payload.type === 'compare' && evaluation.state.compare.result) {
+        compareEvaluationFingerprint.value = buildCompareEvaluationFingerprint()
+    }
+}
+
+const handleReEvaluateActive = async () => {
+    const active = evaluation.state.activeDetail
+    if (!active) return
+
+    if (active.type === 'compare' && !ensureCompareEvaluationReady()) {
+        return
+    }
+
+    if (active.type === 'result' && !ensureEvaluationWorkspaceReady()) {
+        return
+    }
+
+    await evaluationHandler.handleReEvaluate()
 }
 
 const handleEvaluateActiveWithFeedback = async (payload: { feedback: string }) => {
+    const active = evaluation.state.activeDetail
+    if (!active) return
+
+    if (active.type === 'compare' && !ensureCompareEvaluationReady()) {
+        return
+    }
+
+    if (active.type === 'result' && !ensureEvaluationWorkspaceReady()) {
+        return
+    }
+
     await evaluationHandler.handleEvaluateActiveWithFeedback(payload.feedback)
 }
 
-const showDetail = (type: 'original' | 'optimized' | 'compare') => {
+const showResultDetail = (variantId: string) => {
+    evaluation.showDetail('result', variantId)
+}
+
+const showDetail = (type: 'compare') => {
     evaluation.showDetail(type)
+}
+
+const openCompareRoleConfig = () => {
+    compareRoleConfig.openDialog()
+}
+
+const handleCompareRoleConfigConfirm = async (
+    roles: PersistedCompareSnapshotRoles<TestVariantId>,
+) => {
+    const requiresTargetSelectionOnConfirm =
+        compareRoleCandidates.value.filter((candidate) => candidate.promptRef.kind === 'workspace').length > 1
+
+    if (
+        requiresTargetSelectionOnConfirm &&
+        !Object.values(roles).includes('target')
+    ) {
+        toast.warning(t('evaluation.compareConfig.targetRequired'))
+        return
+    }
+
+    await compareRoleConfig.saveRoles(roles)
+    compareRoleConfig.closeDialog()
+
+    if (compareRoleConfig.consumePendingCompareAfterConfirm()) {
+        await handleEvaluate('compare')
+    }
 }
 
 const handleApplyLocalPatch = (payload: { operation: PatchOperation }) => {
@@ -1496,6 +2044,16 @@ const handleApplyLocalPatch = (payload: { operation: PatchOperation }) => {
 const handleClearEvaluation = () => {
     evaluation.closePanel()
     evaluation.clearAllResults()
+    resultEvaluationFingerprint.a = ''
+    resultEvaluationFingerprint.b = ''
+    resultEvaluationFingerprint.c = ''
+    resultEvaluationFingerprint.d = ''
+    compareEvaluationFingerprint.value = ''
+}
+
+const handleClearContent = () => {
+    contextUserOptimization.clearContent()
+    handleClearEvaluation()
 }
 
 // ========================
@@ -1512,6 +2070,7 @@ const {
     temporaryVariables: computed(() => ({ ...temporaryVariables.value })),
     predefinedVariables,
     saveGlobalVariable: (name, value) => {
+        if (appSaveToGlobal) { appSaveToGlobal(name, value); return; }
         if (variableManager?.isReady.value) {
             variableManager.addVariable(name, value)
         }
@@ -1523,6 +2082,7 @@ const {
 })
 
 const handleSaveToGlobalFromTest = (name: string, value: string) => {
+    if (appSaveToGlobal) { appSaveToGlobal(name, value); return; }
     if (variableManager?.isReady.value) {
         variableManager.addVariable(name, value)
     }
@@ -1700,6 +2260,7 @@ const restoreFromHistory = (payload: unknown) => {
 
 // 🆕 处理应用改进建议事件（使用 evaluationHandler 提供的工厂方法）
 const handleApplyImprovement = evaluationHandler.createApplyImprovementHandler(promptPanelRef);
+const handleRewriteFromEvaluation = evaluationHandler.createRewriteFromEvaluationHandler(promptPanelRef);
 
 // 处理保存本地编辑
 const handleSaveLocalEdit = async (payload: { note?: string }) => {
@@ -1739,11 +2300,14 @@ defineExpose({
 .context-user-workspace {
     width: 100%;
     height: 100%;
-    display: flex;
-    flex-direction: column;
+    position: relative;
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow: visible;
+}
+
+.workspace-page-tools {
+    display: contents;
 }
 
 .context-user-split {
@@ -1800,11 +2364,40 @@ defineExpose({
 .variant-cell__controls {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 8px;
     min-width: 0;
+    flex-wrap: wrap;
+}
+
+.variant-cell__controls--stacked {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+}
+
+.variant-cell__meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.variant-cell__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1 1 auto;
 }
 
 .variant-cell__label {
+    flex-shrink: 0;
+}
+
+.variant-cell__role {
     flex-shrink: 0;
 }
 
@@ -1813,16 +2406,20 @@ defineExpose({
 }
 
 .variant-cell__model {
-    /* 让模型选择不要无限拉伸：保持紧凑，避免把右侧按钮/布局挤散 */
-    flex: 0 1 220px;
-    max-width: 220px;
+    flex: 1 1 auto;
     min-width: 0;
+}
+
+.variant-cell__run {
+    flex-shrink: 0;
 }
 
 .output-evaluation-entry {
     display: flex;
     align-items: center;
+    flex-shrink: 0;
     white-space: nowrap;
+    margin-right: -2px;
 }
 
 .variant-results-wrap {

@@ -51,6 +51,22 @@ export type {
 } from './services/llm/types'
 export { LLMService, createLLMService } from './services/llm/service'
 export { TextAdapterRegistry, createTextAdapterRegistry } from './services/llm/adapters/registry'
+export {
+  CHROME_BUILT_IN_MODEL_ID,
+  CHROME_BUILT_IN_AUTO_ENABLE_SOURCE,
+  CHROME_BUILT_IN_PROVIDER_ID,
+  canAutoEnableChromeBuiltInConfig,
+  checkChromeBuiltInAvailability,
+  markChromeBuiltInAutoEnabled,
+  markChromeBuiltInUserConfigured,
+  prepareChromeBuiltInModel
+} from './services/llm/chrome-built-in'
+export type {
+  ChromeBuiltInAvailability,
+  ChromeBuiltInDownloadProgress,
+  ChromeLanguageModelLanguageOptions,
+  ChromeBuiltInStatus
+} from './services/llm/chrome-built-in'
 export { ElectronLLMProxy } from './services/llm/electron-proxy'
 export * from './services/llm/errors'
 
@@ -58,6 +74,7 @@ export * from './services/llm/errors'
 export { ModelManager, createModelManager } from './services/model/manager'
 export * from './services/model/types'
 export * from './services/model/defaults'
+export * from './services/model/metadata-resolver'
 export * from './services/model/parameter-schema'
 export * from './services/model/parameter-utils'
 export * from './services/model/advancedParameterDefinitions'
@@ -76,10 +93,13 @@ export type {
   ImageRequest,
   Text2ImageRequest,
   Image2ImageRequest,
+  MultiImageRequest,
+  MultiImageGenerationRequest,
   ImageResult,
   ImageResultItem,
   ImageProgressHandlers,
   ImageModelConfig,
+  ImageModelConfigInput,
   IImageModelManager,
   IImageProviderAdapter,
   IImageAdapterRegistry,
@@ -90,7 +110,10 @@ export type {
   ImageRef,
   FullImageData,
   ImageStorageConfig,
-  IImageStorageService
+  IImageStorageService,
+  ImageInputRef,
+  ImageInputConverter,
+  ImageInputCompatibilityOptions,
 } from './services/image/types'
 // 导出图像存储相关函数和类型
 export { isImageRef, createImageRef } from './services/image/types'
@@ -103,6 +126,16 @@ export { DexieStorageProvider } from './services/storage/dexieStorageProvider'
 export { LocalStorageProvider } from './services/storage/localStorageProvider'
 export { MemoryStorageProvider } from './services/storage/memoryStorageProvider'
 export { FileStorageProvider } from './services/storage/fileStorageProvider'
+export {
+  runStorageStartupSafetyCheck,
+  writeStartupRepairReport,
+  STARTUP_REPAIR_REPORT_PREFERENCE_KEY,
+  STARTUP_REPAIR_REPORT_STORAGE_KEY,
+} from './services/storage/startup-safety-check'
+export type {
+  StartupRepairAction,
+  StartupRepairReport,
+} from './services/storage/startup-safety-check'
 
 // 导出提示词服务相关
 export { PromptService } from './services/prompt/service'
@@ -110,6 +143,9 @@ export { createPromptService } from './services/prompt/factory'
 export * from './services/prompt/types'
 export { ElectronPromptServiceProxy } from './services/prompt/electron-proxy'
 export * from './services/prompt/errors'
+
+// 导出标准提示词领域模型
+export * from './services/prompt-model'
 
 // 导出对比服务相关
 export { CompareService, createCompareService } from './services/compare/service'
@@ -135,6 +171,8 @@ export {
   isBrowser,
   isDevelopment,
   getEnvVar,
+  DEFAULT_VITE_ENV,
+  getDefaultEnvVar,
   scanCustomModelEnvVars,
   clearCustomModelEnvCache,
   CUSTOM_API_PATTERN,
@@ -142,6 +180,16 @@ export {
   MAX_SUFFIX_LENGTH
 } from './utils/environment'
 export type { CustomModelEnvConfig, ValidatedCustomModelEnvConfig, ValidationResult } from './utils/environment'
+export {
+  normalizeCustomRequestHeaders,
+  validateCustomRequestHeaders
+} from './utils/custom-request-headers'
+export type {
+  CustomRequestHeaders,
+  CustomRequestHeaderInput,
+  CustomRequestHeaderValidationError,
+  CustomRequestHeaderValidationResult
+} from './utils/custom-request-headers'
 export type { LLMValidationResult, ValidationError, ValidationWarning } from './services/model/validation'
 export { validateCustomModelConfig } from './utils/environment'
 
@@ -205,6 +253,16 @@ export * from './services/context/constants'
 export { FavoriteManager } from './services/favorite/manager'
 export { FavoriteManagerElectronProxy } from './services/favorite/electron-proxy'
 export { TagTypeConverter } from './services/favorite/type-converter'
+export {
+  FAVORITE_ITEM_HARD_LIMIT_BYTES,
+  FAVORITES_SOFT_LIMIT_BYTES,
+  FAVORITES_HARD_LIMIT_BYTES,
+  INLINE_IMAGE_DATA_URL_RE,
+  assertFavoriteMetadataHasNoInlineImages,
+  assertFavoriteFitsItemBudget,
+  assertFavoritesPayloadWithinBudget,
+  normalizeFavoriteRecord,
+} from './services/favorite/storage-guards'
 export * from './services/favorite/types'
 export * from './services/favorite/errors'
 
@@ -215,6 +273,12 @@ export * from './types/advanced'
 export * from './services/evaluation/types'
 export * from './services/evaluation/errors'
 export { EvaluationService, createEvaluationService } from './services/evaluation/service'
+export * from './services/evaluation/rewrite-from-evaluation'
+
+// 导出图像理解服务相关
+export * from './services/image-understanding/types'
+export { ImageUnderstandingService, createImageUnderstandingService } from './services/image-understanding/service'
+export { ElectronImageUnderstandingServiceProxy } from './services/image-understanding/electron-proxy'
 
 // 🆕 导出变量提取服务相关
 export * from './services/variable-extraction/types'

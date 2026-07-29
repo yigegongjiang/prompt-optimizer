@@ -11,14 +11,16 @@ import type {
 import { IMAGE_ERROR_CODES } from '../../../constants/error-codes'
 
 export class GeminiImageAdapter extends AbstractImageProviderAdapter {
+  private static readonly DYNAMIC_IMAGE_MODEL_PATTERN = /^gemini-.*image/i
+
   getProvider(): ImageProvider {
     return {
       id: 'gemini',
       name: 'Google Gemini',
-      description: 'Google Gemini 图像生成服务',
+      description: 'Google Gemini image generation service',
       requiresApiKey: true,
       defaultBaseURL: 'https://generativelanguage.googleapis.com',
-      supportsDynamicModels: false,
+      supportsDynamicModels: true,
       apiKeyUrl: 'https://aistudio.google.com/apikey',
       connectionSchema: {
         required: ['apiKey'],
@@ -36,7 +38,7 @@ export class GeminiImageAdapter extends AbstractImageProviderAdapter {
       {
         id: 'gemini-2.5-flash-image',
         name: 'Gemini 2.5 Flash Image',
-        description: 'Google Gemini 2.5 Flash 图像生成模型（Nano Banana），支持文生图、图生图和多图输入',
+        description: 'Google Gemini 2.5 Flash image generation model (Nano Banana) with text-to-image, image editing, and multi-image input support',
         providerId: 'gemini',
         capabilities: {
           text2image: true,
@@ -49,9 +51,9 @@ export class GeminiImageAdapter extends AbstractImageProviderAdapter {
         }
       },
       {
-        id: 'gemini-3-pro-image-preview',
-        name: 'Gemini 3 Pro Image',
-        description: 'Google Gemini 3 Pro 高级图像生成模型（Nano Banana Pro），支持高分辨率输出和高级文本渲染',
+        id: 'gemini-3.1-flash-image-preview',
+        name: 'Gemini 3.1 Flash Image Preview',
+        description: 'Google Gemini 3.1 Flash image generation preview model with text-to-image, image editing, and multi-image input support',
         providerId: 'gemini',
         capabilities: {
           text2image: true,
@@ -64,6 +66,50 @@ export class GeminiImageAdapter extends AbstractImageProviderAdapter {
         }
       }
     ]
+  }
+
+  /**
+   * Dynamically fetch available Gemini image-generation models from the Gemini API.
+   * This adapter only supports Gemini image models that are compatible with generateContent.
+   * Falls back to the static model list on failure.
+   */
+  public async getModelsAsync(connectionConfig: Record<string, any>): Promise<ImageModel[]> {
+    try {
+      const apiKey = connectionConfig.apiKey || ''
+      const customBaseURL = connectionConfig.baseURL?.trim()
+
+      const genAI = customBaseURL
+        ? new GoogleGenAI({ apiKey, httpOptions: { baseUrl: this.normalizeBaseUrl(customBaseURL) } })
+        : new GoogleGenAI({ apiKey })
+
+      const modelsPager = await genAI.models.list({ config: { pageSize: 100 } })
+
+      const dynamicModels: ImageModel[] = []
+
+      for await (const model of modelsPager) {
+        const modelId = model.name?.replace('models/', '') || model.name || ''
+        if (!GeminiImageAdapter.DYNAMIC_IMAGE_MODEL_PATTERN.test(modelId)) continue
+
+        dynamicModels.push({
+          id: modelId,
+          name: model.displayName || modelId,
+          description: model.description || `Gemini image model: ${modelId}`,
+          providerId: 'gemini',
+          capabilities: {
+            text2image: true,
+            image2image: true,
+            multiImage: true
+          },
+          parameterDefinitions: this.getParameterDefinitions(modelId),
+          defaultParameterValues: this.getDefaultParameterValues(modelId)
+        })
+      }
+
+      return dynamicModels.length > 0 ? dynamicModels : this.getModels()
+    } catch (error) {
+      console.error('[GeminiImageAdapter] Failed to fetch models dynamically, falling back to static list:', error)
+      return this.getModels()
+    }
   }
 
   protected getTestImageRequest(testType: 'text2image' | 'image2image'): Omit<ImageRequest, 'configId'> {
@@ -114,16 +160,23 @@ export class GeminiImageAdapter extends AbstractImageProviderAdapter {
 
     // 构建请求内容
     let contents: any
-    if (request.inputImage) {
-      // 图生图：使用数组格式
+    const inputImages =
+      Array.isArray(request.inputImages) && request.inputImages.length > 0
+        ? request.inputImages
+        : request.inputImage
+          ? [request.inputImage]
+          : []
+
+    if (inputImages.length > 0) {
+      // 图生图/多图生图：使用数组格式
       contents = [
         { text: request.prompt },
-        {
+        ...inputImages.map((inputImage) => ({
           inlineData: {
-            mimeType: request.inputImage.mimeType || 'image/png',
-            data: request.inputImage.b64
+            mimeType: inputImage.mimeType || 'image/png',
+            data: inputImage.b64
           }
-        }
+        }))
       ]
     } else {
       // 文生图：直接使用文本

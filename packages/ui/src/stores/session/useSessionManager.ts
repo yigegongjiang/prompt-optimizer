@@ -15,7 +15,14 @@
 
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { BasicSubMode, ProSubMode, ImageSubMode } from '@prompt-optimizer/core'
+import {
+  hydratePromptSessionWithOptimizationChain,
+  promptRecordChainToOptimizationChain,
+  type BasicSubMode,
+  type ProSubMode,
+  type ImageSubMode,
+  type PromptSession,
+} from '@prompt-optimizer/core'
 import type { FunctionMode } from '../../composables/mode/useFunctionMode'
 import { getPiniaServices } from '../../plugins/pinia'
 import { useBasicSystemSession } from './useBasicSystemSession'
@@ -24,18 +31,74 @@ import { useProMultiMessageSession } from './useProMultiMessageSession'
 import { useProVariableSession } from './useProVariableSession'
 import { useImageText2ImageSession } from './useImageText2ImageSession'
 import { useImageImage2ImageSession } from './useImageImage2ImageSession'
+import { useImageMultiImageSession } from './useImageMultiImageSession'
+import {
+  buildPromptSessionFromStores,
+  buildPromptSessionRegistryFromStores,
+  buildPromptSessionsFromStores,
+  type PromptSessionProjectionStoreMap,
+} from './promptSessionProjection'
+import { SESSION_STORAGE_KEYS, SESSION_SUB_MODE_KEYS, type SubModeKey } from './sessionKeys'
 
-/**
- * 子模式 key 映射表
- * 格式：{functionMode}-{subMode}
- */
-export type SubModeKey =
-  | 'basic-system'
-  | 'basic-user'
-  | 'pro-multi'       // Pro-多消息模式
-  | 'pro-variable'    // Pro-变量模式
-  | 'image-text2image'  // 文生图
-  | 'image-image2image' // 图生图
+export type { SubModeKey } from './sessionKeys'
+
+const getSessionCleanupKey = (key: SubModeKey, error: unknown): string | null => {
+  if (!error || typeof error !== 'object') {
+    return null
+  }
+
+  const maybeError = error as {
+    code?: unknown
+    params?: {
+      reason?: unknown
+      key?: unknown
+    }
+  }
+
+  if (maybeError.code !== 'error.storage.read') {
+    return null
+  }
+
+  if (
+    maybeError.params?.reason !== 'session_snapshot_too_large' &&
+    maybeError.params?.reason !== 'session_referenced_image_missing'
+  ) {
+    return null
+  }
+
+  if (typeof maybeError.params.key === 'string' && maybeError.params.key.trim()) {
+    return maybeError.params.key
+  }
+
+  return SESSION_STORAGE_KEYS[key]
+}
+
+const asTrimmedString = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed ? trimmed : undefined
+}
+
+const readChainIdFromMetadata = (
+  metadata: Record<string, unknown> | undefined,
+): string | undefined =>
+  asTrimmedString(metadata?.legacyChainId) ??
+  asTrimmedString(metadata?.chainId)
+
+const resolveHydratableHistoryChainId = (session: PromptSession): string | undefined => {
+  const explicitChainId =
+    asTrimmedString(session.optimization.legacyPromptRecordChainId) ??
+    readChainIdFromMetadata(session.optimization.metadata) ??
+    readChainIdFromMetadata(session.metadata)
+  if (explicitChainId) return explicitChainId
+
+  const optimizationId = asTrimmedString(session.optimization.id)
+  if (!optimizationId || optimizationId === `${session.id}:chain`) {
+    return undefined
+  }
+
+  return optimizationId
+}
 
 /**
  * 子模式读取器接口（从外部注入）
@@ -84,7 +147,7 @@ export const useSessionManager = defineStore('sessionManager', () => {
    */
   const getActiveSubModeKey = (): SubModeKey => {
     if (!readers) {
-      console.warn('[SessionManager] 子模式读取器未注入，返回默认值 basic-system')
+      console.warn('[SessionManager] Sub-mode readers have not been injected; falling back to basic-system')
       return 'basic-system'
     }
 
@@ -137,6 +200,53 @@ export const useSessionManager = defineStore('sessionManager', () => {
     return `${mode}-${subMode}` as SubModeKey
   }
 
+  const getProjectionStoreMap = (): PromptSessionProjectionStoreMap => ({
+    'basic-system': useBasicSystemSession(),
+    'basic-user': useBasicUserSession(),
+    'pro-multi': useProMultiMessageSession(),
+    'pro-variable': useProVariableSession(),
+    'image-text2image': useImageText2ImageSession(),
+    'image-image2image': useImageImage2ImageSession(),
+    'image-multiimage': useImageMultiImageSession(),
+  })
+
+  const getPromptSession = (key: SubModeKey = getActiveSubModeKey()) =>
+    buildPromptSessionFromStores(key, getProjectionStoreMap())
+
+  const getHydratedPromptSession = async (key: SubModeKey = getActiveSubModeKey()) => {
+    const session = getPromptSession(key)
+    const chainId = resolveHydratableHistoryChainId(session)
+    if (!chainId) {
+      return session
+    }
+
+    const $services = getPiniaServices()
+    const historyManager = $services?.historyManager
+    if (!historyManager) {
+      return session
+    }
+
+    try {
+      const chain = await historyManager.getChain(chainId)
+      return hydratePromptSessionWithOptimizationChain(
+        session,
+        promptRecordChainToOptimizationChain(chain),
+      )
+    } catch (error) {
+      console.warn('[SessionManager] Failed to hydrate prompt session history chain; using synchronous projection:', error)
+      return session
+    }
+  }
+
+  const getAllPromptSessions = () =>
+    buildPromptSessionsFromStores(getProjectionStoreMap())
+
+  const getPromptSessionRegistry = () =>
+    buildPromptSessionRegistryFromStores(
+      getProjectionStoreMap(),
+      getActiveSubModeKey(),
+    )
+
   /**
    * 切换功能模式（响应外部 functionMode 变化）
    * @param fromKey 旧模式的 key（由 watch 传入）
@@ -155,7 +265,7 @@ export const useSessionManager = defineStore('sessionManager', () => {
       // 2. 恢复新模式会话
       await restoreSubModeSession(toKey)
     } catch (error) {
-      console.error('[SessionManager] 模式切换失败:', error)
+      console.error('[SessionManager] Failed to switch mode:', error)
     } finally {
       isSwitching.value = false
     }
@@ -179,7 +289,7 @@ export const useSessionManager = defineStore('sessionManager', () => {
       // 2. 恢复新子模式会话
       await restoreSubModeSession(toKey)
     } catch (error) {
-      console.error('[SessionManager] 子模式切换失败:', error)
+      console.error('[SessionManager] Failed to switch sub-mode:', error)
     } finally {
       isSwitching.value = false
     }
@@ -210,9 +320,12 @@ export const useSessionManager = defineStore('sessionManager', () => {
         case 'image-image2image':
           await useImageImage2ImageSession().saveSession()
           break
+        case 'image-multiimage':
+          await useImageMultiImageSession().saveSession()
+          break
       }
     } catch (error) {
-      console.error(`[SessionManager] 保存 ${key} 会话失败:`, error)
+      console.error(`[SessionManager] Failed to save ${key} session:`, error)
     }
   }
 
@@ -223,13 +336,13 @@ export const useSessionManager = defineStore('sessionManager', () => {
   const saveSubModeSession = async (key: SubModeKey) => {
     // ✅ 强制检查：必须先恢复才能保存
     if (!hasRestoredAllSessions.value) {
-      console.warn(`[SessionManager] 尝试保存 ${key} 但未完成全局恢复，跳过以避免覆盖持久化数据`)
+      console.warn(`[SessionManager] Attempted to save ${key} before global restore completed; skipping to avoid overwriting persisted data`)
       return
     }
 
     // ⚠️ 并发保护：如果上一次保存还在进行中，跳过本次
     if (saveInFlight.value) {
-      console.warn(`[SessionManager] 保存操作进行中，跳过 ${key} 会话保存`)
+      console.warn(`[SessionManager] A save operation is already in progress; skipping ${key} session save`)
       return
     }
 
@@ -265,9 +378,33 @@ export const useSessionManager = defineStore('sessionManager', () => {
         case 'image-image2image':
           await useImageImage2ImageSession().restoreSession()
           break
+        case 'image-multiimage':
+          await useImageMultiImageSession().restoreSession()
+          break
       }
     } catch (error) {
-      console.error(`[SessionManager] 恢复 ${key} 会话失败:`, error)
+      const cleanupKey = getSessionCleanupKey(key, error)
+      if (cleanupKey) {
+        console.info(`[SessionManager] Detected a corrupted session snapshot; preparing cleanup: ${cleanupKey}`)
+      } else {
+        console.error(`[SessionManager] Failed to restore ${key} session:`, error)
+      }
+
+      if (!cleanupKey) {
+        return
+      }
+
+      const $services = getPiniaServices()
+      if (!$services?.preferenceService) {
+        return
+      }
+
+      try {
+        await $services.preferenceService.delete(cleanupKey)
+        console.info(`[SessionManager] Removed corrupted session snapshot: ${cleanupKey}`)
+      } catch (cleanupError) {
+        console.error(`[SessionManager] Failed to remove corrupted session snapshot (${cleanupKey}):`, cleanupError)
+      }
     }
   }
 
@@ -303,16 +440,7 @@ export const useSessionManager = defineStore('sessionManager', () => {
       // Some users may have very large persisted snapshots (e.g. long prompts / test outputs / image metadata).
       // Parallel JSON.parse + reactive assignment across 6 stores can spike memory and crash the browser process.
       // Restore sequentially to reduce peak memory usage and avoid "browser crash" reports.
-      const keys: SubModeKey[] = [
-        'basic-system',
-        'basic-user',
-        'pro-multi',
-        'pro-variable',
-        'image-text2image',
-        'image-image2image',
-      ]
-
-      for (const key of keys) {
+      for (const key of SESSION_SUB_MODE_KEYS) {
         await restoreSubModeSession(key)
         // Yield to the event loop to keep the UI responsive and reduce long-task pressure.
         await new Promise(resolve => setTimeout(resolve, 0))
@@ -338,7 +466,7 @@ export const useSessionManager = defineStore('sessionManager', () => {
     while (saveInFlight.value) {
       if (Date.now() - startTime > MAX_WAIT) {
         // ⚠️ 超时时直接返回，不要强制执行（避免误解锁）
-        console.warn('[SessionManager] 等待保存完成超时，放弃本次保存')
+        console.warn('[SessionManager] Timed out while waiting for the current save to finish; aborting this save request')
         return
       }
       // 等待 50ms 后重试
@@ -355,20 +483,12 @@ export const useSessionManager = defineStore('sessionManager', () => {
       // IMPORTANT:
       // Save sequentially to reduce peak memory usage for very large sessions.
       // (Parallel JSON.stringify across 6 stores can spike memory and crash the browser on pagehide/unmount.)
-      const keys: SubModeKey[] = [
-        'basic-system',
-        'basic-user',
-        'pro-multi',
-        'pro-variable',
-        'image-text2image',
-        'image-image2image',
-      ]
-      for (const key of keys) {
+      for (const key of SESSION_SUB_MODE_KEYS) {
         await _saveSubModeSessionUnsafe(key)
         await new Promise(resolve => setTimeout(resolve, 0))
       }
     } catch (error) {
-      console.error('[SessionManager] 保存所有会话失败:', error)
+      console.error('[SessionManager] Failed to save all sessions:', error)
     } finally {
       // ✅ 只有我获得的锁，我才释放
       if (acquired) {
@@ -385,6 +505,10 @@ export const useSessionManager = defineStore('sessionManager', () => {
     injectSubModeReaders,
     getActiveSubModeKey,
     computeSubModeKey,
+    getPromptSession,
+    getHydratedPromptSession,
+    getAllPromptSessions,
+    getPromptSessionRegistry,
     switchMode,
     switchSubMode,
     saveSubModeSession,

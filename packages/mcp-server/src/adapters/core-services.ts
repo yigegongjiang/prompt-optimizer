@@ -12,6 +12,7 @@ import {
   createTemplateManager,
   createHistoryManager,
   createPromptService,
+  createImageUnderstandingService,
   PromptService,
   IPromptService,
   ModelManager,
@@ -73,7 +74,7 @@ export class CoreServicesManager {
 
       // 5. 初始化语言服务
       logger.debug('Initializing LanguageService');
-      const defaultLanguage = config.defaultLanguage || process.env.MCP_DEFAULT_LANGUAGE || 'zh';
+      const defaultLanguage = resolveDefaultLanguage(config);
       this.languageService = createSimpleLanguageService(defaultLanguage);
       await this.languageService.initialize();
 
@@ -92,7 +93,8 @@ export class CoreServicesManager {
         this.modelManager,
         this.llmService,
         this.templateManager,
-        this.historyManager
+        this.historyManager,
+        createImageUnderstandingService(),
       );
 
       // 10. 验证服务健康状态
@@ -108,7 +110,7 @@ export class CoreServicesManager {
       // 检查是否有任何可用的模型配置
       this.showEnvironmentHint();
 
-      throw new Error(`Core services initialization failed: ${(error as Error).message}`);
+      throw new Error(`Core services initialization failed: ${(error as Error).message}`, { cause: error });
     }
   }
 
@@ -127,14 +129,14 @@ export class CoreServicesManager {
       // 获取并显示当前使用的模型信息
       const mcpModel = await this.modelManager.getModel('mcp-default');
       if (mcpModel) {
-        logger.info(`✅ Using model: ${mcpModel.name} (${mcpModel.provider})`);
-        logger.info(`   Model: ${mcpModel.defaultModel}`);
-        logger.info(`   Base URL: ${mcpModel.baseURL}`);
+        logger.info(`✅ Using model: ${mcpModel.name} (${mcpModel.providerMeta.id})`);
+        logger.info(`   Model: ${mcpModel.modelMeta.id}`);
+        logger.info(`   Base URL: ${mcpModel.connectionConfig.baseURL || mcpModel.providerMeta.defaultBaseURL}`);
       } else {
         logger.info(`Default model configured with preferred provider: ${config.preferredModelProvider || 'auto-selected'}`);
       }
     } catch (error) {
-      throw new Error(`Failed to setup default model: ${(error as Error).message}`);
+      throw new Error(`Failed to setup default model: ${(error as Error).message}`, { cause: error });
     }
   }
 
@@ -197,7 +199,7 @@ export class CoreServicesManager {
         });
         console.error('   Please check if your API keys are valid.');
       }
-    } catch (error) {
+    } catch {
       // 如果检查环境变量失败，显示通用提示
       console.error('💡 Please ensure you have set valid API keys.');
     }
@@ -263,4 +265,8 @@ export class CoreServicesManager {
       }
     };
   }
+}
+
+export function resolveDefaultLanguage(config: Pick<MCPServerConfig, 'defaultLanguage'>): string {
+  return config.defaultLanguage || process.env.MCP_DEFAULT_LANGUAGE || 'en-US';
 }

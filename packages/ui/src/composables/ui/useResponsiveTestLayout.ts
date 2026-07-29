@@ -188,10 +188,10 @@ export function useResponsiveTestLayout(options: ResponsiveTestLayoutOptions = {
       compareMode: {
         enabled: !isMobile.value,
         layout: isMobile.value || isTablet.value ? 'vertical' : 'horizontal',
-        showOriginal: !isMobile.value
+        showPrimary: !isMobile.value
       },
       singleMode: {
-        title: '测试结果',
+        title: 'test.testResult',
         showToolbar: isDesktop.value
       },
       display: {

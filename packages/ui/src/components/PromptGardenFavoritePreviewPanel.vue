@@ -4,6 +4,8 @@
     :snapshot="snapshot"
     editable
     :busy="isSaving"
+    :hidden-sections="gardenSnapshotHiddenSections"
+    :source-only="gardenSnapshotSourceOnly"
     @upload-cover="handleGardenCoverUpload"
     @append-showcase-images="handleGardenShowcaseUpload"
   />
@@ -25,10 +27,13 @@ import {
   persistImageSourceAsAssetId,
   resolveAssetIdToDataUrl,
 } from '../utils/image-asset-storage'
+import { getI18nErrorMessage } from '../utils/error'
 import GardenSnapshotPreview from './GardenSnapshotPreview.vue'
 
 const props = defineProps<{
   favorite: FavoritePrompt
+  gardenSnapshotHiddenSections?: Array<'basicInfo' | 'metaInfo' | 'cover' | 'showcases' | 'examples' | 'variables'>
+  gardenSnapshotSourceOnly?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -273,7 +278,7 @@ const updateGardenSnapshot = async (
     message.success(t('favorites.manager.preview.garden.saveSnapshotSuccess'))
     emit('favorite-updated', props.favorite.id)
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : '未知错误'
+    const errorMessage = getI18nErrorMessage(error, t('common.error'))
     message.error(`${t('favorites.manager.preview.garden.saveSnapshotFailed')}: ${errorMessage}`)
   } finally {
     isSaving.value = false

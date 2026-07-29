@@ -2,10 +2,16 @@
  * Utility functions for environment detection and configuration.
  */
 
+import { getDefaultEnvVar } from './default-env'
+import { normalizeCustomRequestHeaders, validateCustomRequestHeaders } from './custom-request-headers'
+
+export { DEFAULT_VITE_ENV, getDefaultEnvVar } from './default-env'
+
 // 常量定义
-export const CUSTOM_API_PATTERN = /^VITE_CUSTOM_API_(KEY|BASE_URL|MODEL)_(.+)$/;
+export const CUSTOM_API_PATTERN = /^VITE_CUSTOM_API_(KEY|BASE_URL|MODEL|PARAMS|HEADERS)_(.+)$/;
 export const SUFFIX_PATTERN = /^[a-zA-Z0-9_-]+$/;
 export const MAX_SUFFIX_LENGTH = 50;
+const FORBIDDEN_CUSTOM_PARAM_KEYS = new Set(['model', 'messages', 'stream']);
 
 // 简单的缓存机制
 let cachedCustomModels: Record<string, ValidatedCustomModelEnvConfig> | null = null;
@@ -24,6 +30,10 @@ export interface CustomModelEnvConfig {
   baseURL?: string;
   /** 模型名称（可选） */
   model?: string;
+  /** 额外请求参数（JSON 字符串，可选） */
+  params?: string;
+  /** 自定义请求头（JSON 字符串，可选） */
+  headers?: string;
 }
 
 /**
@@ -39,6 +49,10 @@ export interface ValidatedCustomModelEnvConfig {
   baseURL: string;
   /** 模型名称（已验证存在） */
   model: string;
+  /** 已解析的额外请求参数（可选） */
+  params?: Record<string, unknown>;
+  /** 已解析的自定义请求头（可选） */
+  customHeaders?: Record<string, string>;
 }
 
 /**
@@ -105,6 +119,61 @@ export function validateCustomModelConfig(config: CustomModelEnvConfig): Validat
   }
 
   return result;
+}
+
+function parseCustomModelParams(rawParams: string, suffix: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(rawParams);
+
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      console.warn(`[scanCustomModelEnvVars] Invalid PARAMS for ${suffix}: must be a JSON object`);
+      return undefined;
+    }
+
+    const sanitizedParams = { ...(parsed as Record<string, unknown>) };
+    const removedKeys: string[] = [];
+
+    FORBIDDEN_CUSTOM_PARAM_KEYS.forEach((key) => {
+      if (key in sanitizedParams) {
+        delete sanitizedParams[key];
+        removedKeys.push(key);
+      }
+    });
+
+    if (removedKeys.length > 0) {
+      console.warn(
+        `[scanCustomModelEnvVars] Ignored forbidden PARAMS keys for ${suffix}: ${removedKeys.join(', ')}`
+      );
+    }
+
+    return sanitizedParams;
+  } catch (error) {
+    console.warn(`[scanCustomModelEnvVars] Failed to parse PARAMS for ${suffix}:`, error);
+    return undefined;
+  }
+}
+
+function parseCustomModelHeaders(rawHeaders: string, suffix: string): Record<string, string> | undefined {
+  try {
+    const parsed = JSON.parse(rawHeaders);
+
+    if ((typeof parsed !== 'object' || parsed === null)) {
+      console.warn(`[scanCustomModelEnvVars] Invalid HEADERS for ${suffix}: must be a JSON object or array`);
+      return undefined;
+    }
+
+    const validation = validateCustomRequestHeaders(parsed as any);
+    if (!validation.valid) {
+      const details = validation.errors.map(error => `${error.key} (${error.reason})`).join(', ');
+      console.warn(`[scanCustomModelEnvVars] Ignored invalid HEADERS for ${suffix}: ${details}`);
+      return undefined;
+    }
+
+    return normalizeCustomRequestHeaders(parsed as any);
+  } catch (error) {
+    console.warn(`[scanCustomModelEnvVars] Failed to parse HEADERS for ${suffix}:`, error);
+    return undefined;
+  }
 }
 
 /**
@@ -227,7 +296,7 @@ export const getEnvVar = (key: string): string => {
   if (typeof window !== 'undefined' && window.runtime_config) {
     // 移除 VITE_ 前缀以匹配运行时配置中的键名
     const runtimeKey = key.replace('VITE_', '');
-    const value = window.runtime_config[runtimeKey];
+    const value = window.runtime_config[runtimeKey] ?? window.runtime_config[key];
     if (value !== undefined && value !== null) {
       return String(value);
     }
@@ -250,7 +319,11 @@ export const getEnvVar = (key: string): string => {
     // 忽略错误
   }
 
-  // 4. 最后返回空字符串
+  // 4. 产品内建默认值（覆盖 web / extension / desktop 缺省打包场景）
+  const defaultValue = getDefaultEnvVar(key);
+  if (defaultValue) return defaultValue;
+
+  // 5. 最后返回空字符串
   return '';
 };
 
@@ -330,7 +403,9 @@ export function scanCustomModelEnvVars(useCache: boolean = true): Record<string,
           suffix,
           apiKey: undefined,
           baseURL: undefined,
-          model: undefined
+          model: undefined,
+          params: undefined,
+          headers: undefined
         };
       }
 
@@ -345,6 +420,12 @@ export function scanCustomModelEnvVars(useCache: boolean = true): Record<string,
         case 'MODEL':
           customModels[suffix].model = value;
           break;
+        case 'PARAMS':
+          customModels[suffix].params = value;
+          break;
+        case 'HEADERS':
+          customModels[suffix].headers = value;
+          break;
         default:
           console.warn(`[scanCustomModelEnvVars] Unknown config type: ${configType} in ${key}`);
           break;
@@ -358,8 +439,28 @@ export function scanCustomModelEnvVars(useCache: boolean = true): Record<string,
     const validation = validateCustomModelConfig(config);
 
     if (validation.valid) {
-      // 类型断言：验证通过的配置确保所有必需字段存在
-      validModels[suffix] = config as ValidatedCustomModelEnvConfig;
+      const validatedConfig: ValidatedCustomModelEnvConfig = {
+        suffix: config.suffix,
+        apiKey: config.apiKey!,
+        baseURL: config.baseURL!,
+        model: config.model!
+      };
+
+      if (config.params) {
+        const parsedParams = parseCustomModelParams(config.params, suffix);
+        if (parsedParams !== undefined) {
+          validatedConfig.params = parsedParams;
+        }
+      }
+
+      if (config.headers) {
+        const parsedHeaders = parseCustomModelHeaders(config.headers, suffix);
+        if (parsedHeaders !== undefined) {
+          validatedConfig.customHeaders = parsedHeaders;
+        }
+      }
+
+      validModels[suffix] = validatedConfig;
 
       // 输出警告信息
       if (validation.warnings.length > 0) {

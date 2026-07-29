@@ -5,13 +5,15 @@
       v-for="plugin in activePlugins"
       :key="plugin.id"
       :favorite="favorite"
+      :garden-snapshot-hidden-sections="gardenSnapshotHiddenSections"
+      :garden-snapshot-source-only="gardenSnapshotSourceOnly"
       @favorite-updated="handleFavoriteUpdated"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, shallowRef } from 'vue'
 import type { FavoritePrompt } from '@prompt-optimizer/core'
 
 import {
@@ -21,13 +23,15 @@ import {
 
 const props = defineProps<{
   favorite: FavoritePrompt
+  gardenSnapshotHiddenSections?: string[]
+  gardenSnapshotSourceOnly?: boolean
 }>()
 
 const emit = defineEmits<{
   'favorite-updated': [favoriteId: string]
 }>()
 
-const plugins = ref<FavoritePreviewPlugin[]>([])
+const plugins = shallowRef<FavoritePreviewPlugin[]>([])
 
 const activePlugins = computed(() => {
   return plugins.value.filter((plugin) => plugin.match(props.favorite))

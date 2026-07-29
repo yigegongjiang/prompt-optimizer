@@ -7,7 +7,7 @@
 import { ref, type Ref } from 'vue'
 import { useToast } from '../ui/useToast'
 import { useI18n } from 'vue-i18n'
-import { getI18nErrorMessage } from '../../utils/error'
+import { formatErrorSummary } from '../../utils/error'
 import type { AppServices } from '../../types/services'
 import type {
   VariableValueGenerationResponse,
@@ -29,7 +29,8 @@ export interface UseVariableValueGenerationReturn {
   generateValues: (
     promptContent: string,
     variables: VariableToGenerate[],
-    generationModelKey: string
+    generationModelKey: string,
+    contextVariables?: VariableToGenerate[]
   ) => Promise<void>
   /** 批量应用变量值方法 */
   confirmBatchApply: (selectedValues: GeneratedVariableValue[]) => void
@@ -60,7 +61,8 @@ export function useVariableValueGeneration(
   const generateValues = async (
     promptContent: string,
     variables: VariableToGenerate[],
-    generationModelKey: string
+    generationModelKey: string,
+    contextVariables: VariableToGenerate[] = []
   ): Promise<void> => {
     if (!services.value?.variableValueGenerationService) {
       toast.error(t('test.variableValueGeneration.serviceNotReady'))
@@ -78,6 +80,7 @@ export function useVariableValueGeneration(
       const result = await services.value.variableValueGenerationService.generate({
         promptContent,
         variables,
+        contextVariables,
         generationModelKey,
       })
 
@@ -89,8 +92,7 @@ export function useVariableValueGeneration(
         toast.info(t('test.variableValueGeneration.noValues'))
       }
     } catch (error) {
-      const errorMsg = getI18nErrorMessage(error, 'Unknown error')
-      toast.error(`${t('test.variableValueGeneration.generateFailed')}: ${errorMsg}`)
+      toast.error(formatErrorSummary(t('test.variableValueGeneration.generateFailed'), error))
       console.error('[useVariableValueGeneration] Generate failed:', error)
     } finally {
       isGenerating.value = false

@@ -44,6 +44,20 @@ export interface TextModelConfig {
   id: string;
   name: string;
   enabled: boolean;
+  activationState?: {
+    userConfigured?: boolean;
+    autoEnabledBy?: string;
+  };
+  /**
+   * Authoritative provider identity. Legacy configs may omit this and infer it
+   * from providerMeta/modelMeta during manager normalization.
+   */
+  providerId?: string;
+  /**
+   * Authoritative model identity. Legacy configs may omit this and infer it
+   * from modelMeta during manager normalization.
+   */
+  modelId?: string;
   providerMeta: TextProvider;
   modelMeta: TextModel;
   connectionConfig: {
@@ -67,6 +81,12 @@ export interface StoredTextModelConfig {
   id: string;
   name: string;
   enabled: boolean;
+  activationState?: {
+    userConfigured?: boolean;
+    autoEnabledBy?: string;
+  };
+  providerId?: string;
+  modelId?: string;
   providerMeta: TextProvider;
   modelMeta: TextModel;
   connectionConfig: Record<string, any>;

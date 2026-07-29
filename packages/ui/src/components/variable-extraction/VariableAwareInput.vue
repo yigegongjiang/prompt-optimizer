@@ -96,6 +96,7 @@ import { useI18n } from "vue-i18n";
 import { useToast } from "../../composables/ui/useToast";
 import { useVariableDetection } from "./useVariableDetection";
 import VariableExtractionDialog from "./VariableExtractionDialog.vue";
+import { TEXT_SELECTION_ERRORS } from "./useTextSelection";
 import {
     variableHighlighter,
     variableAutocompletion,
@@ -322,7 +323,7 @@ const validateSelection = (
 ): { isValid: boolean; reason?: string } => {
     // 是否有有效选择
     if (start === end || !selectedText.trim()) {
-        return { isValid: false, reason: "未选中任何文本" };
+        return { isValid: false, reason: TEXT_SELECTION_ERRORS.emptySelection };
     }
 
     // 检查是否跨越变量边界
@@ -332,19 +333,19 @@ const validateSelection = (
     const openBracesBefore = (beforeSelection.match(/\{\{/g) || []).length;
     const closeBracesBefore = (beforeSelection.match(/\}\}/g) || []).length;
     if (openBracesBefore > closeBracesBefore) {
-        return { isValid: false, reason: "不能跨越变量边界" };
+        return { isValid: false, reason: TEXT_SELECTION_ERRORS.crossesVariableBoundary };
     }
 
     const openBracesAfter = (afterSelection.match(/\{\{/g) || []).length;
     const closeBracesAfter = (afterSelection.match(/\}\}/g) || []).length;
     if (closeBracesAfter > openBracesAfter) {
-        return { isValid: false, reason: "不能跨越变量边界" };
+        return { isValid: false, reason: TEXT_SELECTION_ERRORS.crossesVariableBoundary };
     }
 
     const openBracesInSelection = (selectedText.match(/\{\{/g) || []).length;
     const closeBracesInSelection = (selectedText.match(/\}\}/g) || []).length;
     if (openBracesInSelection !== closeBracesInSelection) {
-        return { isValid: false, reason: "不能跨越变量边界" };
+        return { isValid: false, reason: TEXT_SELECTION_ERRORS.crossesVariableBoundary };
     }
 
     return { isValid: true };
@@ -477,7 +478,7 @@ const checkSelection = () => {
 
         if (
             validation.reason &&
-            validation.reason !== "未选中任何文本"
+            validation.reason !== TEXT_SELECTION_ERRORS.emptySelection
         ) {
             message.warning(validation.reason);
         }
@@ -540,22 +541,16 @@ const handleExtractionConfirm = (data: {
 
     const placeholder = `{{${data.variableName}}}`;
     const text = editorView.state.doc.toString();
-    let newValue = text;
-
-    if (data.replaceAll && occurrenceCount.value > 1) {
-        // 全部替换
-        newValue = replaceAllOccurrencesOutsideVariables(
-            text,
-            currentSelection.value.rawText,
-            placeholder,
-        );
-    } else {
-        // 仅替换当前选中的文本
-        newValue =
-            text.substring(0, currentSelection.value.start) +
-            placeholder +
-            text.substring(currentSelection.value.end);
-    }
+    const newValue =
+        data.replaceAll && occurrenceCount.value > 1
+            ? replaceAllOccurrencesOutsideVariables(
+                  text,
+                  currentSelection.value.rawText,
+                  placeholder,
+              )
+            : text.substring(0, currentSelection.value.start) +
+              placeholder +
+              text.substring(currentSelection.value.end);
 
     // 更新编辑器内容
     editorView.dispatch({

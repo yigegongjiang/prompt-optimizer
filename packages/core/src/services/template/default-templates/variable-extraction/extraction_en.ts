@@ -4,7 +4,7 @@
  * Intelligently identify parameterizable variables in prompts using LLM
  */
 
-import type { Template, MessageTemplate } from '../../../types';
+import type { Template, MessageTemplate } from '../../types';
 
 export const template: Template = {
   id: 'variable-extraction',
@@ -57,10 +57,12 @@ Strictly use JSON format, wrapped in a \`\`\`json code block:
 
 # Important Rules
 
-- Return at most 20 variables, sorted by importance
+- Return at most 5 variables, sorted by importance
+- Prioritize subject, count, color, key action, and key scene or core style anchor
+- Avoid low-value decorative fragments, repeated modifiers, and minor embellishments
 - position.originalText must be precisely findable in the original text
 - position.occurrence indicates which occurrence (starting from 1)
-- If the original text already has {{variable}}, do not extract it again
+- If the original text already has {{=<% %>=}}{{variable}}<%={{ }}=%>, do not extract it again
 - If there are no suitable variables, return {"variables": [], "summary": "No extractable variables"}
 
 Only output JSON, without additional explanations.`

@@ -7,7 +7,11 @@ import {
   ImageModelConfig,
   ImageModel,
   Text2ImageRequest,
-  Image2ImageRequest
+  Image2ImageRequest,
+  MultiImageRequest,
+  MultiImageGenerationRequest,
+  ImageInputRef,
+  ImageInputCompatibilityOptions,
 } from './types'
 import { createImageAdapterRegistry } from './adapters/registry'
 import { BaseError } from '../llm/errors'
@@ -15,6 +19,7 @@ import { IMAGE_ERROR_CODES } from '../../constants/error-codes'
 import { mergeOverrides } from '../model/parameter-utils'
 import { ImageError } from './errors'
 import { toErrorWithCode } from '../../utils/error'
+import { normalizeImageInputForLlm, normalizeImageInputsForLlm } from './input-normalizer'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -23,13 +28,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export class ImageService implements IImageService {
   private readonly registry: IImageAdapterRegistry
   private readonly imageModelManager: IImageModelManager
+  private readonly imageInputOptions: ImageInputCompatibilityOptions
 
-  constructor(imageModelManager: IImageModelManager, registry?: IImageAdapterRegistry) {
+  constructor(
+    imageModelManager: IImageModelManager,
+    registry?: IImageAdapterRegistry,
+    imageInputOptions: ImageInputCompatibilityOptions = {}
+  ) {
     this.imageModelManager = imageModelManager
     this.registry = registry ?? createImageAdapterRegistry()
+    this.imageInputOptions = imageInputOptions
   }
 
   async validateRequest(request: ImageRequest): Promise<void> {
+    if (Array.isArray(request.inputImages) && request.inputImages.length > 0) {
+      if (request.inputImages.length > 1) {
+        const multiImage: MultiImageRequest = {
+          ...request,
+          inputImage: undefined,
+          inputImages: request.inputImages,
+        }
+        await this.validateMultiImageRequest(multiImage)
+        return
+      }
+
+      const image2image: Image2ImageRequest = {
+        ...request,
+        inputImage: request.inputImage ?? request.inputImages[0],
+      }
+      await this.validateImage2ImageRequest(image2image)
+      return
+    }
+
     // 兼容入口：仍按是否携带 inputImage 判断模式。
     // 注意：这是 legacy 行为；推荐调用方使用显式的 validateText2ImageRequest/validateImage2ImageRequest。
     if (request.inputImage) {
@@ -46,7 +76,11 @@ export class ImageService implements IImageService {
   async validateText2ImageRequest(request: Text2ImageRequest): Promise<void> {
     // 显式文生图：不允许携带 inputImage（即使调用方用 any 绕过类型）
     const unsafeInputImage = (request as unknown as { inputImage?: unknown }).inputImage
+    const unsafeInputImages = (request as unknown as { inputImages?: unknown }).inputImages
     if (unsafeInputImage !== undefined && unsafeInputImage !== null) {
+      throw new ImageError(IMAGE_ERROR_CODES.TEXT2IMAGE_INPUT_IMAGE_NOT_ALLOWED)
+    }
+    if (Array.isArray(unsafeInputImages) && unsafeInputImages.length > 0) {
       throw new ImageError(IMAGE_ERROR_CODES.TEXT2IMAGE_INPUT_IMAGE_NOT_ALLOWED)
     }
 
@@ -110,6 +144,27 @@ export class ImageService implements IImageService {
     }
   }
 
+  async validateMultiImageRequest(request: MultiImageRequest): Promise<void> {
+    await this.validateBaseRequest(request)
+
+    if (!Array.isArray(request.inputImages) || request.inputImages.length < 2) {
+      throw new ImageError(IMAGE_ERROR_CODES.MULTI_IMAGE_AT_LEAST_TWO_REQUIRED)
+    }
+
+    for (const inputImage of request.inputImages) {
+      const unsafeUrl = (inputImage as unknown as { url?: unknown }).url
+      if (typeof unsafeUrl === 'string' && unsafeUrl.trim()) {
+        throw new ImageError(IMAGE_ERROR_CODES.INPUT_IMAGE_URL_NOT_SUPPORTED)
+      }
+
+      if (!inputImage.b64 || typeof inputImage.b64 !== 'string' || !inputImage.b64.trim()) {
+        throw new ImageError(IMAGE_ERROR_CODES.INPUT_IMAGE_B64_REQUIRED)
+      }
+
+      this.validateInputImage(inputImage)
+    }
+  }
+
   private async validateBaseRequest(request: Pick<ImageRequest, 'prompt' | 'configId' | 'count'>): Promise<void> {
     // 验证基本字段
     if (!request?.prompt || !request.prompt.trim()) {
@@ -143,7 +198,7 @@ export class ImageService implements IImageService {
     }
   }
 
-  private validateInputImage(inputImage: { b64: string; mimeType?: string }): void {
+  private validateInputImage(inputImage: ImageInputRef): void {
     // validateImage2ImageRequest 已经校验 b64 非空
 
     // 验证输入图像格式
@@ -151,12 +206,7 @@ export class ImageService implements IImageService {
       throw new ImageError(IMAGE_ERROR_CODES.INPUT_IMAGE_INVALID_FORMAT)
     }
 
-    // 验证输入图像 MIME 类型和大小
-    const mime = (inputImage.mimeType || '').toLowerCase()
-    if (mime && mime !== 'image/png' && mime !== 'image/jpeg') {
-      throw new ImageError(IMAGE_ERROR_CODES.INPUT_IMAGE_UNSUPPORTED_MIME, undefined, { mimeType: inputImage.mimeType })
-    }
-
+    // 非标准 MIME 由 LLM 请求前的兼容层尽力转成 PNG；转换失败时保留原格式交给 provider。
     // 估算 base64 大小：每4字符≈3字节，去除末尾填充
     const len = inputImage.b64.length
     const padding = (inputImage.b64.endsWith('==') ? 2 : inputImage.b64.endsWith('=') ? 1 : 0)
@@ -177,6 +227,11 @@ export class ImageService implements IImageService {
     return await this.generateInternal(request)
   }
 
+  async generateMultiImage(request: MultiImageGenerationRequest): Promise<ImageResult> {
+    await this.validateMultiImageRequest(request)
+    return await this.generateInternal(request)
+  }
+
   async generate(request: ImageRequest): Promise<ImageResult> {
     // 兼容入口：保留原行为
     await this.validateRequest(request)
@@ -193,7 +248,7 @@ export class ImageService implements IImageService {
     // 获取适配器
     const adapter = this.registry.getAdapter(config.providerId)
     const runtimeConfig = this.prepareRuntimeConfig(config)
-    const runtimeRequest = this.prepareRuntimeRequest(request, runtimeConfig)
+    const runtimeRequest = await this.prepareRuntimeRequest(request, runtimeConfig)
 
     try {
       // 调用适配器生成
@@ -266,7 +321,7 @@ export class ImageService implements IImageService {
       }
     }
 
-    const runtimeRequest = this.prepareRuntimeRequest(request, runtimeConfig)
+    const runtimeRequest = await this.prepareRuntimeRequest(request, runtimeConfig)
     // 直接调用适配器，绕过 imageModelManager 的存储查找
     try {
       return await adapter.generate(runtimeRequest, runtimeConfig)
@@ -305,12 +360,34 @@ export class ImageService implements IImageService {
     }
   }
 
-  private prepareRuntimeRequest(request: ImageRequest, config: ImageModelConfig): ImageRequest {
+  private async prepareRuntimeRequest(request: ImageRequest, config: ImageModelConfig): Promise<ImageRequest> {
     // 最终兜底：不允许把 url 输入图透传给适配器。
     const unsafeInputImage = (request as unknown as { inputImage?: unknown }).inputImage
     if (isRecord(unsafeInputImage) && typeof unsafeInputImage.url === 'string' && unsafeInputImage.url.trim()) {
       throw new ImageError(IMAGE_ERROR_CODES.INPUT_IMAGE_URL_NOT_SUPPORTED)
     }
+
+    const normalizedInputImages = Array.isArray(request.inputImages)
+      ? request.inputImages.map((inputImage) => {
+          const unsafeUrl = (inputImage as unknown as { url?: unknown }).url
+          if (typeof unsafeUrl === 'string' && unsafeUrl.trim()) {
+            throw new ImageError(IMAGE_ERROR_CODES.INPUT_IMAGE_URL_NOT_SUPPORTED)
+          }
+
+          return {
+            b64: inputImage.b64,
+            mimeType: inputImage.mimeType,
+          }
+        })
+      : undefined
+
+    const normalizedLlmInputImages = await normalizeImageInputsForLlm(
+      normalizedInputImages,
+      this.imageInputOptions,
+    )
+    const normalizedLlmInputImage = request.inputImage
+      ? await normalizeImageInputForLlm(request.inputImage, this.imageInputOptions)
+      : undefined
 
     const schema = config.model?.parameterDefinitions ?? []
 
@@ -329,9 +406,19 @@ export class ImageService implements IImageService {
 
     return {
       ...request,
+      inputImage:
+        normalizedLlmInputImage ??
+        (normalizedLlmInputImages && normalizedLlmInputImages.length === 1
+          ? normalizedLlmInputImages[0]
+          : undefined),
+      inputImages: normalizedLlmInputImages,
       paramOverrides: normalizedOverrides
     }
   }
 }
 
-export const createImageService = (imageModelManager: IImageModelManager, registry?: IImageAdapterRegistry) => new ImageService(imageModelManager, registry)
+export const createImageService = (
+  imageModelManager: IImageModelManager,
+  registry?: IImageAdapterRegistry,
+  imageInputOptions: ImageInputCompatibilityOptions = {}
+) => new ImageService(imageModelManager, registry, imageInputOptions)

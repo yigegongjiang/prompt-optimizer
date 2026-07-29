@@ -1,4 +1,5 @@
 import { expect, type Page } from '@playwright/test'
+import { throwIfCurrentTestHasVCRFailure, waitForConditionOrVCRFailure } from './vcr'
 
 /**
  * 工作区模式类型
@@ -8,6 +9,7 @@ export type WorkspaceMode =
   | 'basic-user'
   | 'image-text2image'
   | 'image-image2image'
+  | 'image-multiimage'
   | 'pro-multi'
   | 'pro-variable'
 
@@ -17,7 +19,7 @@ export type WorkspaceMode =
  * - 'original': 原始提示词评估
  * - 'optimized': 优化后提示词评估
  */
-export type EvaluationType = 'prompt-only' | 'original' | 'optimized'
+export type EvaluationType = 'prompt-only' | 'original' | 'optimized' | 'compare'
 
 /**
  * 获取指定模式的工作区容器
@@ -126,6 +128,7 @@ export async function getEvaluationScore(
   mode: WorkspaceMode,
   evalType: EvaluationType = 'prompt-only'
 ): Promise<number> {
+  throwIfCurrentTestHasVCRFailure()
   const workspace = getWorkspace(page, mode)
 
   // 使用组合 testid 精确定位：score-badge-analysis, score-badge-original
@@ -133,7 +136,14 @@ export async function getEvaluationScore(
   await expect(scoreBadge).toBeVisible({ timeout: 90000 })
 
   // 等待加载完成
-  await expect(scoreBadge).not.toHaveClass(/loading/, { timeout: 60000 })
+  await waitForConditionOrVCRFailure(
+    async () => !/loading/.test((await scoreBadge.getAttribute('class')) || ''),
+    {
+      timeoutMs: 60000,
+      intervalMs: 100,
+      description: `evaluation score badge ${evalType} should leave loading state`,
+    }
+  )
 
   // 获取分数值
   const scoreValue = scoreBadge.locator('[data-testid="score-value"]')
@@ -150,6 +160,28 @@ export async function getEvaluationScore(
 }
 
 /**
+ * 若评估详情抽屉处于打开状态，则将其关闭。
+ * 部分分析/评估流程会自动弹出右侧详情面板；后续继续操作测试区前需要先收起它，
+ * 否则可能拦截按钮点击。
+ */
+export async function closeEvaluationPanelIfOpen(page: Page): Promise<void> {
+  const drawers = page.locator('.n-drawer:visible')
+  const drawerCount = await drawers.count()
+  if (drawerCount === 0) return
+
+  const drawer = drawers.last()
+  const closeButton = drawer.locator('.n-base-close').first()
+
+  if (await closeButton.isVisible().catch(() => false)) {
+    await closeButton.click({ timeout: 10000 })
+  } else {
+    await page.keyboard.press('Escape').catch(() => {})
+  }
+
+  await expect(drawer).toBeHidden({ timeout: 10000 })
+}
+
+/**
  * 验证分析按钮在输入为空时禁用
  *
  * @param page Playwright Page 对象
@@ -159,6 +191,7 @@ export async function verifyAnalyzeButtonDisabledWhenEmpty(
   page: Page,
   mode: WorkspaceMode
 ): Promise<void> {
+  throwIfCurrentTestHasVCRFailure()
   const workspace = getWorkspace(page, mode)
   const button = workspace.locator(`[data-testid="${mode}-analyze-button"]`)
 

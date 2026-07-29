@@ -5,6 +5,59 @@ import {
   isValueEmpty
 } from './parameter-schema'
 
+const PYTHON_LITERAL_REPLACEMENTS: Array<[string, string]> = [
+  ['True', 'true'],
+  ['False', 'false'],
+  ['None', 'null']
+]
+
+function isIdentifierChar(char: string | undefined): boolean {
+  return char !== undefined && /[A-Za-z0-9_]/.test(char)
+}
+
+function normalizePythonLiterals(input: string): string {
+  let result = ''
+  let inString = false
+  let escaped = false
+
+  for (let index = 0; index < input.length; index++) {
+    const char = input[index]
+
+    if (inString) {
+      result += char
+      if (escaped) {
+        escaped = false
+      } else if (char === '\\') {
+        escaped = true
+      } else if (char === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+      result += char
+      continue
+    }
+
+    const replacement = PYTHON_LITERAL_REPLACEMENTS.find(([token]) =>
+      input.startsWith(token, index) &&
+      !isIdentifierChar(input[index - 1]) &&
+      !isIdentifierChar(input[index + token.length])
+    )
+
+    if (replacement) {
+      result += replacement[1]
+      index += replacement[0].length - 1
+    } else {
+      result += char
+    }
+  }
+
+  return result
+}
+
 /**
  * 智能解析自定义参数值，自动推断类型
  * - true/false -> boolean
@@ -41,6 +94,11 @@ export function parseCustomValue(value: string): unknown {
       (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
     try {
       return JSON.parse(trimmed)
+    } catch {
+      // 尝试规范化 Python 风格字面量后重试
+    }
+    try {
+      return JSON.parse(normalizePythonLiterals(trimmed))
     } catch {
       // 解析失败，作为字符串处理
     }

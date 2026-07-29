@@ -22,6 +22,8 @@ Prompt Optimizer 现在支持配置无限数量的自定义模型，让您可以
 VITE_CUSTOM_API_KEY_<suffix>=your-api-key          # 必需
 VITE_CUSTOM_API_BASE_URL_<suffix>=your-base-url    # 必需
 VITE_CUSTOM_API_MODEL_<suffix>=your-model-name     # 必需
+VITE_CUSTOM_API_PARAMS_<suffix>=json-object-string # 可选，额外请求参数
+VITE_CUSTOM_API_HEADERS_<suffix>=json-object-string # 可选，额外请求头
 ```
 
 ### 配置要求
@@ -30,6 +32,8 @@ VITE_CUSTOM_API_MODEL_<suffix>=your-model-name     # 必需
 - **API_KEY**：必需，用于API认证
 - **BASE_URL**：必需，API服务器地址
 - **MODEL**：必需，具体的模型名称
+- **PARAMS**：可选，JSON 对象字符串，会注入到最终请求体中
+- **HEADERS**：可选，JSON 对象字符串，会作为请求头发送，仅建议用于 `x-auth-token`、`x-tenant-id` 这类网关附加头
 
 ### 后缀名命名示例
 
@@ -54,6 +58,9 @@ VITE_CUSTOM_API_MODEL_<suffix>=your-model-name     # 必需
 - **长度限制**：最大50个字符
 - **冲突检查**：不能与现有静态模型名冲突（如：openai, gemini, deepseek, zhipu, siliconflow, custom）
 - **完整性要求**：所有三个配置项都必须提供，缺少任何一项都会跳过该模型
+- **额外参数要求**：`PARAMS` 必须是 JSON 对象字符串，不能是数组、字符串或数字
+- **保留字段**：`PARAMS` 中的 `model`、`messages`、`stream` 会被自动忽略，避免覆盖核心请求结构
+- **请求头限制**：`HEADERS` 不能覆盖 `Authorization`、`Content-Type`、`Host`、`Cookie` 等由客户端或浏览器管理的基础头
 
 ### 配置示例
 
@@ -62,6 +69,7 @@ VITE_CUSTOM_API_MODEL_<suffix>=your-model-name     # 必需
 VITE_CUSTOM_API_KEY=default-custom-key
 VITE_CUSTOM_API_BASE_URL=http://localhost:11434/v1
 VITE_CUSTOM_API_MODEL=default-model
+VITE_CUSTOM_API_HEADERS={"x-auth-token":"gateway-token"}
 
 # Ollama Qwen3 模型
 VITE_CUSTOM_API_KEY_qwen3=ollama-qwen3-key
@@ -77,12 +85,58 @@ VITE_CUSTOM_API_MODEL_qwen2_5=qwen2.5:14b
 VITE_CUSTOM_API_KEY_claude_local=claude-local-key
 VITE_CUSTOM_API_BASE_URL_claude_local=http://localhost:8080/v1
 VITE_CUSTOM_API_MODEL_claude_local=claude-3-sonnet
+VITE_CUSTOM_API_PARAMS_claude_local={"temperature":0.3,"top_p":0.8}
 
 # 其他自建 API 服务
 VITE_CUSTOM_API_KEY_my_llm=my-llm-api-key
 VITE_CUSTOM_API_BASE_URL_my_llm=https://my-api.example.com/v1
 VITE_CUSTOM_API_MODEL_my_llm=my-custom-model
+VITE_CUSTOM_API_PARAMS_my_llm={"temperature":0.7,"top_p":0.9,"max_tokens":4096}
+
+# NVIDIA NIM thinking 模式
+VITE_CUSTOM_API_KEY_nvidia=nvapi-xxx
+VITE_CUSTOM_API_BASE_URL_nvidia=https://integrate.api.nvidia.com/v1
+VITE_CUSTOM_API_MODEL_nvidia=qwen/qwen3.5-397b-a17b
+VITE_CUSTOM_API_PARAMS_nvidia={"chat_template_kwargs":{"enable_thinking":true},"temperature":0.6,"top_p":0.95,"max_tokens":16384}
 ```
+
+### 额外请求头说明
+
+`VITE_CUSTOM_API_HEADERS_<suffix>` 适合企业网关要求附加认证或租户信息的场景，例如：
+
+```bash
+VITE_CUSTOM_API_HEADERS_company='{"x-auth-token":"gateway-token","x-tenant-id":"team-a"}'
+```
+
+请求头配置只作用于 Custom API（OpenAI 兼容接口）。`Authorization` 仍由 API Key 生成，`Content-Type` 由客户端和 SDK 管理，不应放在这里。
+
+### 额外请求参数说明
+
+`VITE_CUSTOM_API_PARAMS_<suffix>` 适合以下场景：
+
+- 为 OpenAI 兼容接口补充 `temperature`、`top_p`、`max_tokens` 等标准参数
+- 传递供应商特有字段，例如 NVIDIA NIM 的 `chat_template_kwargs`
+- 在 Docker 运行时一次性下发模型默认参数，避免每次在 UI 中重新手动填写
+
+配置示例：
+
+```json
+{
+  "chat_template_kwargs": {
+    "enable_thinking": true
+  },
+  "temperature": 0.6,
+  "top_p": 0.95,
+  "max_tokens": 16384
+}
+```
+
+注意事项：
+
+- 参数值必须是合法 JSON 对象字符串
+- 如在 Docker Compose 中填写复杂 JSON，建议使用单引号包裹整个值
+- `timeout` 可以作为额外参数传入，用于覆盖请求超时
+- 系统不会自动校验供应商私有参数的语义，请按目标服务文档填写
 
 ## UI 显示效果
 
@@ -109,6 +163,7 @@ VITE_CUSTOM_API_MODEL_my_llm=my-custom-model
 VITE_CUSTOM_API_KEY_qwen3=your-qwen-key
 VITE_CUSTOM_API_BASE_URL_qwen3=http://localhost:11434/v1
 VITE_CUSTOM_API_MODEL_qwen3=qwen3:8b
+VITE_CUSTOM_API_PARAMS_qwen3={"temperature":0.7}
 ```
 
 ### Desktop 应用
@@ -135,9 +190,11 @@ docker run -d -p 8081:80 \
   -e VITE_CUSTOM_API_KEY_ollama=dummy-key \
   -e VITE_CUSTOM_API_BASE_URL_ollama=http://host.docker.internal:11434/v1 \
   -e VITE_CUSTOM_API_MODEL_ollama=qwen2.5:7b \
+  -e 'VITE_CUSTOM_API_PARAMS_ollama={"temperature":0.7}' \
   -e VITE_CUSTOM_API_KEY_qwen3=your-qwen3-key \
   -e VITE_CUSTOM_API_BASE_URL_qwen3=http://host.docker.internal:11434/v1 \
   -e VITE_CUSTOM_API_MODEL_qwen3=qwen3:8b \
+  -e 'VITE_CUSTOM_API_PARAMS_qwen3={"temperature":0.6,"top_p":0.95}' \
   --restart unless-stopped \
   --name prompt-optimizer \
   linshen/prompt-optimizer
@@ -152,9 +209,11 @@ VITE_OPENAI_API_KEY=your-openai-key
 VITE_CUSTOM_API_KEY_ollama=dummy-key
 VITE_CUSTOM_API_BASE_URL_ollama=http://host.docker.internal:11434/v1
 VITE_CUSTOM_API_MODEL_ollama=qwen2.5:7b
+VITE_CUSTOM_API_PARAMS_ollama={"temperature":0.7}
 VITE_CUSTOM_API_KEY_qwen3=your-qwen3-key
 VITE_CUSTOM_API_BASE_URL_qwen3=http://host.docker.internal:11434/v1
 VITE_CUSTOM_API_MODEL_qwen3=qwen3:8b
+VITE_CUSTOM_API_PARAMS_qwen3={"temperature":0.6,"top_p":0.95}
 ```
 
 使用环境变量文件运行：
@@ -168,7 +227,7 @@ docker run -d -p 8081:80 --env-file .env \
 
 #### 方式3：Docker Compose
 
-修改 `docker-compose.yml` 添加 `env_file` 配置：
+修改 `docker/docker-compose.yml` 添加 `env_file` 配置：
 
 ```yaml
 services:
@@ -202,6 +261,8 @@ A: 启动应用后，检查控制台日志。成功配置的模型会显示类�
 [generateDynamicModels] Generated model: custom_qwen3 (Qwen3)
 ```
 
+如果使用了 `PARAMS`，还可以在浏览器开发者工具的 Network 面板里检查发出的请求体是否包含额外字段。
+
 ### Q: 配置错误时会发生什么？
 
 A: 系统会输出详细的错误信息，但不会影响其他模型的正常使用：
@@ -209,6 +270,8 @@ A: 系统会输出详细的错误信息，但不会影响其他模型的正常�
 [scanCustomModelEnvVars] Skipping invalid_suffix due to validation errors:
   - Invalid suffix format: invalid$suffix
 ```
+
+如果 `PARAMS` 不是合法 JSON 对象，系统会忽略该参数配置并输出警告，但模型本身仍然可用。
 
 ### Q: 可以配置多少个自定义模型？
 

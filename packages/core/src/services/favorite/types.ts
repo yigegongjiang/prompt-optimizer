@@ -27,7 +27,7 @@ export interface FavoritePrompt {
   /** 优化模式 (二级分类,仅用于 basic/context 模式) */
   optimizationMode?: 'system' | 'user';
   /** 图像子模式 (二级分类,仅用于 image 模式) */
-  imageSubMode?: 'text2image' | 'image2image';
+  imageSubMode?: 'text2image' | 'image2image' | 'multiimage';
 
   /** 元数据 (系统管理,用户不可编辑) */
   metadata?: {
@@ -141,6 +141,12 @@ export interface IFavoriteManager {
 
   /** 更新收藏 */
   updateFavorite(id: string, updates: Partial<FavoritePrompt>): Promise<void>;
+
+  /** 显式切换收藏内提示词资产的当前版本 */
+  setFavoritePromptAssetCurrentVersion(id: string, versionId: string): Promise<void>;
+
+  /** 删除收藏内提示词资产的非当前版本 */
+  deleteFavoritePromptAssetVersion(id: string, versionId: string): Promise<void>;
 
   /** 删除收藏 */
   deleteFavorite(id: string): Promise<void>;

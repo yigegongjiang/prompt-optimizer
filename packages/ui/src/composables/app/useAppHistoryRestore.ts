@@ -13,12 +13,15 @@ import { useToast } from '../ui/useToast'
 import type { ConversationMessage } from '../../types'
 import type { ProMultiMessageSessionApi } from '../../stores/session/useProMultiMessageSession'
 import type {
+    PromptAssetBinding,
     ContextMode,
     PromptRecord,
     PromptRecordChain,
     IHistoryManager,
     OptimizationMode,
+    PromptSessionOrigin,
 } from '@prompt-optimizer/core'
+import { extractHistorySourceBinding } from '../../utils/history-source-binding'
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
     !!value && typeof value === 'object'
@@ -37,7 +40,7 @@ export interface HistoryContext {
  * 工作区组件引用类型
  */
 interface WorkspaceRef {
-    restoreFromHistory?: (payload: unknown) => void
+    restoreFromHistory?: (payload: unknown) => void | Promise<void>
 }
 
 /**
@@ -47,7 +50,7 @@ export interface AppHistoryRestoreOptions {
     /** 服务实例 */
     services: Ref<{ historyManager: IHistoryManager } | null>
     /** 🔧 Step D: 路由导航函数（替代 setFunctionMode/set*SubMode） */
-    navigateToSubModeKey: (toKey: string, opts?: { replace?: boolean }) => void
+    navigateToSubModeKey: (toKey: string, opts?: { replace?: boolean }) => boolean | void | Promise<boolean | void>
     /** 处理上下文模式变更 */
     handleContextModeChange: (mode: ContextMode) => Promise<void>
     /** 处理历史记录选择 */
@@ -62,6 +65,13 @@ export interface AppHistoryRestoreOptions {
     t: (key: string, params?: Record<string, unknown>) => string
     /** 外部数据加载中标志（防止模式切换的自动 restore 覆盖外部数据） */
     isLoadingExternalData: Ref<boolean>
+    /** 将历史记录中的来源资产坐标恢复到目标工作区 session */
+    restoreSourceBindingForTargetKey?: (
+        targetKey: string,
+        state: { assetBinding?: PromptAssetBinding; origin?: PromptSessionOrigin },
+    ) => void
+    /** Persist the target workspace session after a history restore writes its session pointers. */
+    saveSessionForTargetKey?: (targetKey: string) => void | Promise<void>
 }
 
 type ConversationSnapshotMessage = {
@@ -95,9 +105,22 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
         userWorkspaceRef,
         t,
         isLoadingExternalData,
+        restoreSourceBindingForTargetKey,
+        saveSessionForTargetKey,
     } = options
 
     const toast = useToast()
+
+    const persistRestoredSession = async (targetKey: string) => {
+        if (!saveSessionForTargetKey) return
+
+        try {
+            await saveSessionForTargetKey(targetKey)
+        } catch (error) {
+            console.error(`[App] Failed to save restored history session for ${targetKey}:`, error)
+            toast.warning(t('toast.warning.saveHistoryFailed'))
+        }
+    }
 
     /**
      * 处理历史记录使用 - 智能模式切换（内部实现）
@@ -113,7 +136,8 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
             rt === 'contextImageOptimize' ||
             rt === 'imageIterate' ||
             rt === 'text2imageOptimize' ||
-            rt === 'image2imageOptimize'
+            rt === 'image2imageOptimize' ||
+            rt === 'multiimageOptimize'
         ) {
             // 图像模式：使用 navigateToSubModeKey 导航
             // 根据记录类型设置正确的图像子模式
@@ -125,17 +149,27 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
                     ? 'text2image'
                     : rt === 'image2imageOptimize'
                       ? 'image2image'
+                      : rt === 'multiimageOptimize'
+                        ? 'multiimage'
                       : hasInputImage
                         ? 'image2image'
                         : 'text2image' // 默认为文生图模式
 
             // 🔧 Step D: 使用 navigateToSubModeKey 替代 setImageSubMode
-            navigateToSubModeKey(`image-${imageMode}`)
+            const targetKey = `image-${imageMode}`
+            const didNavigate = await navigateToSubModeKey(targetKey)
+            if (didNavigate === false) {
+                throw new Error(`Invalid image workspace target: ${targetKey}`)
+            }
             toast.info(t('toast.info.switchedToImageMode'))
 
             // 🆕 图像模式专用数据回填逻辑
             // 等待路由切换完成后再回填数据
             await nextTick()
+            restoreSourceBindingForTargetKey?.(
+                targetKey,
+                extractHistorySourceBinding(record, chain),
+            )
 
             // 🆕 图像模式专用数据回填逻辑
             const imageHistoryData = {
@@ -158,6 +192,7 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
                 )
             }
 
+            await persistRestoredSession(targetKey)
             toast.success(t('toast.success.imageHistoryRestored'))
             return // 图像模式不需要调用原有的历史记录处理逻辑
         } else {
@@ -186,10 +221,17 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
                 targetFunctionMode === 'pro'
                     ? `pro-${targetMode === 'system' ? 'multi' : 'variable'}`
                     : `basic-${targetMode}`
-            navigateToSubModeKey(targetKey)
+            const didNavigate = await navigateToSubModeKey(targetKey)
+            if (didNavigate === false) {
+                throw new Error(`Invalid workspace target: ${targetKey}`)
+            }
 
             // 等待路由切换完成
             await nextTick()
+            restoreSourceBindingForTargetKey?.(
+                targetKey,
+                extractHistorySourceBinding(record, chain),
+            )
 
             // 更新 toast 提示（如果需要）
             toast.info(
@@ -209,7 +251,7 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
                 (targetFunctionMode === 'pro' && targetMode === 'user')
             ) {
                 await nextTick()
-                userWorkspaceRef.value?.restoreFromHistory?.({
+                await userWorkspaceRef.value?.restoreFromHistory?.({
                     record,
                     chain,
                     rootPrompt: context.rootPrompt,
@@ -230,7 +272,7 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
                     conversationSnapshot =
                         conversationSnapshotRaw as ConversationSnapshotMessage[]
                     console.log(
-                        '[App] 从历史记录恢复会话快照，消息数:',
+                        '[App] Restoring conversation snapshot from history. Message count:',
                         conversationSnapshot.length,
                     )
 
@@ -280,16 +322,16 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
                                         }
                                     } else {
                                         console.warn(
-                                            `[App] 消息 ${snapshotMsg.id} 版本 v${snapshotMsg.appliedVersion} 不存在，使用快照内容`,
+                                            `[App] Message ${snapshotMsg.id} version v${snapshotMsg.appliedVersion} was not found. Falling back to snapshot content.`,
                                         )
                                         console.warn(
-                                            `[App] 可用版本:`,
+                                            '[App] Available versions:',
                                             msgChain.versions.map((v) => v.version),
                                         )
                                     }
                                 } catch (error) {
                                     console.warn(
-                                        `[App] 消息 ${snapshotMsg.id} 版本加载失败，使用快照内容:`,
+                                        `[App] Failed to load version for message ${snapshotMsg.id}. Falling back to snapshot content:`,
                                         error,
                                     )
                                 }
@@ -337,21 +379,23 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
                     if (targetMessage) {
                         toast.success(t('toast.success.conversationRestored'))
                     } else if (messageId) {
-                        console.warn('[App] 会话快照中未找到被优化的消息 ID:', messageId)
+                        console.warn('[App] Optimized message ID was not found in the conversation snapshot:', messageId)
                         toast.warning(t('toast.warning.messageNotFoundInSnapshot'))
                     }
                 } else if (messageId) {
                     if (targetMessage) {
                         console.log(
-                            '[App] 历史记录无会话快照，尝试在当前会话中查找消息（旧版本数据）',
+                            '[App] No conversation snapshot found in history. Trying to locate the message in the current session (legacy data).',
                         )
                         toast.warning(t('toast.warning.restoredFromLegacyHistory'))
                     } else {
-                        console.warn('[App] 旧版本历史记录中未找到消息 ID:', messageId)
+                        console.warn('[App] Message ID was not found in legacy history data:', messageId)
                         toast.warning(t('toast.warning.messageNotFoundInSnapshot'))
                     }
                 }
             }
+
+            await persistRestoredSession(targetKey)
         }
     }
 
@@ -366,7 +410,7 @@ export function useAppHistoryRestore(options: AppHistoryRestoreOptions): AppHist
             await handleHistoryReuseImpl(context)
         } catch (error) {
             // 捕获历史记录恢复过程中的所有错误
-            console.error('[App] 历史记录恢复失败:', error)
+            console.error('[App] Failed to restore history:', error)
             const errorMessage = error instanceof Error ? error.message : String(error)
             toast.error(t('toast.error.historyRestoreFailed', { error: errorMessage }))
         } finally {

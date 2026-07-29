@@ -7,6 +7,7 @@ import type {
 } from '../types';
 import { AbstractAdapterRegistry } from '../../adapters/abstract-registry';
 import { OpenAIAdapter } from './openai-adapter';
+import { OpenAICompatibleAdapter } from './openai-compatible-adapter';
 import { AnthropicAdapter } from './anthropic-adapter';
 import { GeminiAdapter } from './gemini-adapter';
 import { DeepseekAdapter } from './deepseek-adapter';
@@ -17,6 +18,10 @@ import { OpenRouterAdapter } from './openrouter-adapter';
 import { ModelScopeAdapter } from './modelscope-adapter';
 import { OllamaAdapter } from './ollama-adapter';
 import { MinimaxAdapter } from './minimax-adapter';
+import { CloudflareAdapter } from './cloudflare-adapter';
+import { GrokAdapter } from './grok-adapter';
+import { ChromeBuiltInAdapter } from './chrome-built-in-adapter';
+import { XiaomiMimoTokenPlanAdapter } from './xiaomi-mimo-token-plan-adapter';
 import { RequestConfigError } from '../errors';
 
 /**
@@ -50,6 +55,7 @@ export class TextAdapterRegistry
   protected initializeAdapters(): void {
     // 注册适配器
     const openaiAdapter = new OpenAIAdapter();
+    const openaiCompatibleAdapter = new OpenAICompatibleAdapter();
     const deepseekAdapter = new DeepseekAdapter();
     const siliconflowAdapter = new SiliconflowAdapter();
     const zhipuAdapter = new ZhipuAdapter();
@@ -60,8 +66,13 @@ export class TextAdapterRegistry
     const modelscopeAdapter = new ModelScopeAdapter();
     const ollamaAdapter = new OllamaAdapter();
     const minimaxAdapter = new MinimaxAdapter();
+    const cloudflareAdapter = new CloudflareAdapter();
+    const grokAdapter = new GrokAdapter();
+    const chromeBuiltInAdapter = new ChromeBuiltInAdapter();
+    const xiaomiMimoTokenPlanAdapter = new XiaomiMimoTokenPlanAdapter();
 
     this.adapters.set('openai', openaiAdapter);
+    this.adapters.set('openai-compatible', openaiCompatibleAdapter);
     this.adapters.set('deepseek', deepseekAdapter);
     this.adapters.set('siliconflow', siliconflowAdapter);
     this.adapters.set('zhipu', zhipuAdapter);
@@ -72,6 +83,10 @@ export class TextAdapterRegistry
     this.adapters.set('modelscope', modelscopeAdapter);
     this.adapters.set('ollama', ollamaAdapter);
     this.adapters.set('minimax', minimaxAdapter);
+    this.adapters.set('cloudflare', cloudflareAdapter);
+    this.adapters.set('grok', grokAdapter);
+    this.adapters.set('chrome-built-in', chromeBuiltInAdapter);
+    this.adapters.set('xiaomi-mimo-token-plan', xiaomiMimoTokenPlanAdapter);
 
     // 预加载静态模型缓存
     this.preloadStaticModels();
@@ -111,7 +126,7 @@ export class TextAdapterRegistry
    * 获取错误消息的提供商类型描述
    */
   protected getProviderTypeDescription(): string {
-    return '文本模型提供商';
+    return 'text model provider';
   }
 }
 

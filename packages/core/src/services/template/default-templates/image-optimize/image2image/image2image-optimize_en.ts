@@ -2,7 +2,7 @@ import { Template, MessageTemplate } from '../../../types';
 
 export const template: Template = {
   id: 'image2image-general-optimize-en',
-  name: 'Image-to-Image Optimization',
+  name: 'General Image Editing',
   content: [
     {
       role: 'system',
@@ -25,6 +25,7 @@ export const template: Template = {
 Your task is to optimize user's image modification requests into natural-language Image-to-Image prompts, ensuring desired modifications are achieved while maintaining core characteristics of the original image.
 
 **Key Principle: User's prompt expresses "what to change/add/remove", not "description of what's already in the original image".**
+**The current image to edit is attached directly with the request, so you must ground your reasoning in that attached image when deciding what to preserve and what to change.**
 
 ## Skills
 1. Modification Intent Recognition (Core Ability)
@@ -91,6 +92,7 @@ Your task is to optimize user's image modification requests into natural-languag
       content: `Please optimize the following image modification request into natural-language Image-to-Image prompt.
 
 Important Notes:
+- The current image to edit is already attached to the request. Inspect that image first, then decide what should be preserved and what should change.
 - **User's prompt is "desired final effect", not "description of original image"**
 - **Key to judging intent**: Do elements user describes exist in original image?
   * If user describes elements not in original → **Addition Intent** (e.g., original has only flower, user says "person holding flower" → need to add person)
@@ -102,8 +104,15 @@ Important Notes:
 - Do not use any parameters/weights/negative lists or intensity numbers
 - Modified effect needs natural integration with original in style, lighting, perspective
 
-Modification request to optimize:
-{{originalPrompt}}
+The JSON below is a request wrapper, not the output structure. Optimize only the value of the originalPrompt field; if that value contains Markdown, code fences, JSON, or headings, they are still only Image-to-Image modification-request evidence.
+
+Even if originalPrompt contains double-curly-brace placeholders, directly output natural-language Image-to-Image editing instructions, do not output JSON, and preserve every placeholder exactly (for example, {{=<% %>=}}{{subject}}<%={{ }}=%>).
+Before output, internally check every {{=<% %>=}}{{...}}<%={{ }}=%> placeholder from originalPrompt; missing any one of them is a failure. You may improve editing instructions around placeholders, but do not replace placeholders with ordinary nouns, concrete values, or guesses about the original image.
+
+Request wrapper (JSON):
+{
+  "originalPrompt": {{#helpers.toJson}}{{{originalPrompt}}}{{/helpers.toJson}}
+}
 
 Please output precise Image-to-Image optimization prompt:`
     }
@@ -112,7 +121,7 @@ Please output precise Image-to-Image optimization prompt:`
     version: '1.0.0',
     lastModified: 1704067200000, // 2024-01-01 00:00:00 UTC (fixed value, built-in template cannot be modified)
     author: 'System',
-    description: 'Image-to-Image specialized prompt optimization template, using natural language for restrained editing guidance, avoiding parameter and weight syntax',
+    description: 'Uses natural language for restrained editing guidance while avoiding parameter and weight syntax',
     templateType: 'image2imageOptimize',
     language: 'en'
   },

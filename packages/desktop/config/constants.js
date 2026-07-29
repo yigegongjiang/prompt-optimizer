@@ -8,6 +8,7 @@
 const IPC_EVENTS = {
   UPDATE_CHECK: 'updater-check-update',
   UPDATE_CHECK_ALL_VERSIONS: 'updater-check-all-versions',
+  UPDATE_OPEN_RELEASE_PAGE: 'updater-open-release-page',
   UPDATE_START_DOWNLOAD: 'updater-start-download',
   UPDATE_INSTALL: 'updater-install-update',
   UPDATE_IGNORE_VERSION: 'updater-ignore-version',
@@ -26,12 +27,14 @@ const IPC_EVENTS = {
 
 // 偏好设置键名常量
 const PREFERENCE_KEYS = {
+  ALLOW_PRERELEASE: 'updater.allowPrerelease',
   IGNORED_VERSIONS: 'updater.ignoredVersions' // 多版本忽略存储
 };
 
 // 默认配置
 const DEFAULT_CONFIG = {
   autoDownload: false,
+  allowPrerelease: false,
   checkInterval: 24 * 60 * 60 * 1000, // 24小时
   timeout: 30000 // 30秒
 };

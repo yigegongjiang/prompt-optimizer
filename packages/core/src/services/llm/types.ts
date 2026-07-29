@@ -120,6 +120,19 @@ export interface Message {
   tool_call_id?: string;
 }
 
+export interface ImageUnderstandingImageInput {
+  b64: string;
+  mimeType?: string;
+}
+
+export interface ImageUnderstandingRequest {
+  systemPrompt?: string;
+  userPrompt: string;
+  images: ImageUnderstandingImageInput[];
+  paramOverrides?: Record<string, unknown>;
+  responseMimeType?: string;
+}
+
 /**
  * LLM响应结构
  */
@@ -297,6 +310,25 @@ export interface ITextProviderAdapter {
     messages: Message[],
     config: TextModelConfig,
     tools: ToolDefinition[],
+    callbacks: StreamHandlers
+  ): Promise<void>
+
+  /**
+   * Send an image-understanding request with one or more reference images.
+   * Providers that do not support multimodal text understanding should throw at request time.
+   */
+  sendImageUnderstanding(
+    request: ImageUnderstandingRequest,
+    config: TextModelConfig
+  ): Promise<LLMResponse>
+
+  /**
+   * Stream an image-understanding request with one or more reference images.
+   * Providers that do not support multimodal streaming should throw at request time.
+   */
+  sendImageUnderstandingStream(
+    request: ImageUnderstandingRequest,
+    config: TextModelConfig,
     callbacks: StreamHandlers
   ): Promise<void>
 

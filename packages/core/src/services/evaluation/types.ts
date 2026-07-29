@@ -12,8 +12,7 @@ import type { BasicSubMode, ProSubMode, ImageSubMode } from '../prompt/types';
  * 评估类型枚举
  */
 export type EvaluationType =
-  | 'original'
-  | 'optimized'
+  | 'result'
   | 'compare'
   | 'prompt-only'      // 仅提示词评估（无需测试结果）
   | 'prompt-iterate';  // 带迭代需求的提示词评估
@@ -32,6 +31,19 @@ export interface EvaluationModeConfig {
   functionMode: 'basic' | 'pro' | 'image';
   /** 子模式 */
   subMode: EvaluationSubMode;
+}
+
+/**
+ * 聚焦说明
+ * - 用户或系统明确指出本次分析/评估最优先要回答的问题
+ */
+export interface FocusBrief {
+  /** 聚焦内容 */
+  content: string;
+  /** 聚焦来源 */
+  source?: 'user' | 'system';
+  /** 优先级：当前统一固定为最高 */
+  priority?: 'highest';
 }
 
 // ==================== Pro 模式评估上下文 ====================
@@ -71,20 +83,243 @@ export interface ProUserEvaluationContext {
     /** 变量名 */
     name: string;
     /** 变量值 */
-    value: string;
+    value?: string;
     /** 变量来源 */
     source: 'predefined' | 'global' | 'temporary';
   }>;
   /** 原始提示词（含变量占位符） */
   rawPrompt: string;
   /** 变量替换后的提示词 */
-  resolvedPrompt: string;
+  resolvedPrompt?: string;
 }
 
 /**
  * Pro 模式评估上下文联合类型
  */
 export type ProEvaluationContext = ProSystemEvaluationContext | ProUserEvaluationContext;
+
+// ==================== 统一内容块 ====================
+
+/**
+ * 统一内容块
+ * 用于承载：
+ * - 左侧分析的设计态上下文
+ * - 右侧测试用例输入
+ * - 右侧执行快照中的额外执行态输入
+ */
+export interface EvaluationContentBlock {
+  /** 内容块种类 */
+  kind: 'text' | 'variables' | 'conversation' | 'image' | 'json' | 'custom';
+  /** 展示标签 */
+  label: string;
+  /** 主内容 */
+  content: string;
+  /** 可选摘要 */
+  summary?: string;
+  /** 可选多媒体证据 */
+  media?: EvaluationMediaItem[];
+}
+
+/**
+ * 评估多媒体证据项
+ * - 固定支持 assetId 或 b64 二选一
+ */
+export interface EvaluationMediaItem {
+  /** 展示标签 */
+  label: string;
+  /** 图像资源引用 */
+  assetId?: string;
+  /** base64 图像数据（不含 data URL 前缀） */
+  b64?: string;
+  /** 图像 MIME 类型 */
+  mimeType?: string;
+}
+
+/**
+ * 当前工作区中的可编辑目标
+ */
+export interface EvaluationTarget {
+  /** 当前工作区提示词（唯一 patch target） */
+  workspacePrompt: string;
+  /** 可选参考提示词（如 v0 / 进入分析前的原始内容） */
+  referencePrompt?: string;
+  /** 可选设计态上下文 */
+  designContext?: EvaluationContentBlock;
+}
+
+/**
+ * 测试用例
+ * - 表达“这次到底在测什么”
+ * - 多个执行快照可以共用同一个测试用例
+ */
+export interface EvaluationTestCase {
+  /** 用例标识 */
+  id: string;
+  /** 展示标签 */
+  label?: string;
+  /** 用例输入 */
+  input: EvaluationContentBlock;
+  /** 可选共享设置摘要 */
+  settingsSummary?: string;
+}
+
+/**
+ * 执行提示词引用
+ */
+export interface EvaluationPromptRef {
+  /** 提示词来源 */
+  kind: 'workspace' | 'original' | 'version' | 'custom';
+  /** 可选版本号 */
+  version?: number;
+  /** 展示标签 */
+  label?: string;
+  /** 动态别名来源（如“上一版”） */
+  dynamicAlias?: 'previous';
+}
+
+/**
+ * 单次执行快照
+ */
+export interface EvaluationSnapshot {
+  /** 快照标识 */
+  id: string;
+  /** 快照标签，如 A/B/C/D */
+  label: string;
+  /** 对应测试用例 */
+  testCaseId: string;
+  /** 提示词来源 */
+  promptRef: EvaluationPromptRef;
+  /** 实际执行提示词 */
+  promptText: string;
+  /** 执行输出 */
+  output: string;
+  /** 可选输出证据块（如图片结果） */
+  outputBlock?: EvaluationContentBlock;
+  /** 可选推理 */
+  reasoning?: string;
+  /** 模型 key */
+  modelKey?: string;
+  /** 可选版本标签 */
+  versionLabel?: string;
+  /** 可选额外执行输入 */
+  executionInput?: EvaluationContentBlock;
+}
+
+/**
+ * Compare 评估的附加提示
+ */
+export interface CompareAnalysisHints {
+  /** compare 模式 */
+  mode?: 'generic' | 'structured';
+  /** 结构化 compare 中各快照的角色 */
+  snapshotRoles?: Record<string, StructuredCompareRole>;
+  /** 是否存在共享测试用例 */
+  hasSharedTestCases?: boolean;
+  /** 是否存在相同提示词跨快照对比 */
+  hasSamePromptSnapshots?: boolean;
+  /** 是否属于同提示词同输入跨模型对比 */
+  hasCrossModelComparison?: boolean;
+}
+
+/**
+ * Structured Compare 角色
+ */
+export type StructuredCompareRole =
+  | 'target'
+  | 'baseline'
+  | 'reference'
+  | 'referenceBaseline'
+  | 'replica'
+  | 'auxiliary';
+
+/**
+ * Compare 的机器可读停止信号
+ */
+export interface CompareStopSignals {
+  targetVsBaseline?: 'improved' | 'flat' | 'regressed';
+  targetVsReferenceGap?: 'none' | 'minor' | 'major';
+  improvementHeadroom?: 'none' | 'low' | 'medium' | 'high';
+  overfitRisk?: 'low' | 'medium' | 'high';
+  stopRecommendation?: 'continue' | 'stop' | 'review';
+  stopReasons?: string[];
+}
+
+/**
+ * Compare judgement 的 pair 类型
+ */
+export type CompareJudgementPairType =
+  | 'targetBaseline'
+  | 'targetReference'
+  | 'referenceBaseline'
+  | 'targetReplica';
+
+/**
+ * Compare 中需要额外暴露给 UI / rewrite / SPO 的冲突信号
+ * - 不直接依赖 synthesis 文本
+ * - 基于 pairwise judge 的确定性派生结果
+ */
+export type CompareConflictSignal =
+  | 'improvementNotSupportedOnReference'
+  | 'improvementUnstableAcrossReplicas'
+  | 'regressionOutweighsCosmeticGains'
+  | 'sampleOverfitRiskVisible';
+
+/**
+ * Compare judgement
+ * - 结构化 compare 内部多次 pairwise judge 的可复用产物
+ * - 供 UI、SPO、rewrite-from-evaluation 等上层直接消费
+ */
+export interface CompareJudgement {
+  pairKey: string;
+  pairType: CompareJudgementPairType;
+  pairLabel: string;
+  leftSnapshotId: string;
+  leftSnapshotLabel: string;
+  leftRole?: StructuredCompareRole;
+  rightSnapshotId: string;
+  rightSnapshotLabel: string;
+  rightRole?: StructuredCompareRole;
+  verdict: 'left-better' | 'right-better' | 'mixed' | 'similar';
+  winner: 'left' | 'right' | 'none';
+  confidence: 'low' | 'medium' | 'high';
+  pairSignal: string;
+  analysis: string;
+  evidence: string[];
+  learnableSignals: string[];
+  overfitWarnings: string[];
+}
+
+/**
+ * Compare insight 高亮
+ * - 对 pairwise judge 的压缩摘要
+ * - 供 UI 和后续自动改写链路直接消费
+ */
+export interface CompareInsightHighlight {
+  pairKey: string;
+  pairType: CompareJudgementPairType;
+  pairLabel: string;
+  pairSignal: string;
+  verdict: CompareJudgement['verdict'];
+  confidence: CompareJudgement['confidence'];
+  analysis: string;
+}
+
+/**
+ * Compare insight 汇总
+ * - 基于 compareJudgements 的本地确定性聚合结果
+ * - 保持轻量，避免再次扩展 compare 主协议
+ */
+export interface CompareInsights {
+  pairHighlights: CompareInsightHighlight[];
+  progressSummary?: CompareInsightHighlight;
+  referenceGapSummary?: CompareInsightHighlight;
+  promptChangeSummary?: CompareInsightHighlight;
+  stabilitySummary?: CompareInsightHighlight;
+  evidenceHighlights?: string[];
+  learnableSignals?: string[];
+  overfitWarnings?: string[];
+  conflictSignals?: CompareConflictSignal[];
+}
 
 // ==================== 补丁操作类型 ====================
 
@@ -125,42 +360,28 @@ export interface PatchOperation {
  * 评估请求基础结构
  */
 export interface EvaluationRequestBase {
-  /** 原始提示词（可选，用于对比） */
-  originalPrompt?: string;
-  /** 用户反馈（可选，用于反馈分析） */
-  userFeedback?: string;
-  /** 测试文本/输入 */
-  testContent?: string;
   /** 评估使用的模型Key */
   evaluationModelKey: string;
   /** 可选：自定义变量 */
   variables?: Record<string, string>;
   /** 评估模式配置（必填） */
   mode: EvaluationModeConfig;
-  /** Pro 模式专用上下文（可选） */
-  proContext?: ProEvaluationContext;
+  /** 聚焦说明（最高优先级） */
+  focus?: FocusBrief;
 }
 
 /**
- * 原始提示词评估请求
- * 评估原始提示词的测试结果是否达成用户目的
+ * 单个结果评估请求
+ * 评估某个提示词在一次测试中的输出效果
  */
-export interface OriginalEvaluationRequest extends EvaluationRequestBase {
-  type: 'original';
-  /** 原始测试结果 */
-  testResult: string;
-}
-
-/**
- * 优化提示词评估请求
- * 评估优化后提示词的测试效果
- */
-export interface OptimizedEvaluationRequest extends EvaluationRequestBase {
-  type: 'optimized';
-  /** 优化后的提示词 */
-  optimizedPrompt: string;
-  /** 优化后的测试结果 */
-  testResult: string;
+export interface ResultEvaluationRequest extends EvaluationRequestBase {
+  type: 'result';
+  /** 当前可编辑目标 */
+  target: EvaluationTarget;
+  /** 当前测试用例 */
+  testCase: EvaluationTestCase;
+  /** 当前执行快照 */
+  snapshot: EvaluationSnapshot;
 }
 
 /**
@@ -169,12 +390,14 @@ export interface OptimizedEvaluationRequest extends EvaluationRequestBase {
  */
 export interface CompareEvaluationRequest extends EvaluationRequestBase {
   type: 'compare';
-  /** 优化后的提示词 */
-  optimizedPrompt: string;
-  /** 原始测试结果 */
-  originalTestResult: string;
-  /** 优化后的测试结果 */
-  optimizedTestResult: string;
+  /** 当前可编辑目标 */
+  target: EvaluationTarget;
+  /** 公共测试用例 */
+  testCases: EvaluationTestCase[];
+  /** 执行快照（至少 2 个） */
+  snapshots: EvaluationSnapshot[];
+  /** compare 子场景提示 */
+  compareHints?: CompareAnalysisHints;
 }
 
 /**
@@ -183,8 +406,8 @@ export interface CompareEvaluationRequest extends EvaluationRequestBase {
  */
 export interface PromptOnlyEvaluationRequest extends EvaluationRequestBase {
   type: 'prompt-only';
-  /** 优化后的提示词 */
-  optimizedPrompt: string;
+  /** 当前可编辑目标 */
+  target: EvaluationTarget;
 }
 
 /**
@@ -193,8 +416,8 @@ export interface PromptOnlyEvaluationRequest extends EvaluationRequestBase {
  */
 export interface PromptIterateEvaluationRequest extends EvaluationRequestBase {
   type: 'prompt-iterate';
-  /** 优化后的提示词 */
-  optimizedPrompt: string;
+  /** 当前可编辑目标 */
+  target: EvaluationTarget;
   /** 迭代需求（来自 iterationNote） */
   iterateRequirement: string;
 }
@@ -203,8 +426,7 @@ export interface PromptIterateEvaluationRequest extends EvaluationRequestBase {
  * 评估请求联合类型
  */
 export type EvaluationRequest =
-  | OriginalEvaluationRequest
-  | OptimizedEvaluationRequest
+  | ResultEvaluationRequest
   | CompareEvaluationRequest
   | PromptOnlyEvaluationRequest
   | PromptIterateEvaluationRequest;
@@ -252,6 +474,11 @@ export interface EvaluationResponse {
     model?: string;
     timestamp?: number;
     duration?: number;
+    compareMode?: 'generic' | 'structured';
+    snapshotRoles?: Record<string, StructuredCompareRole>;
+    compareStopSignals?: CompareStopSignals;
+    compareJudgements?: CompareJudgement[];
+    compareInsights?: CompareInsights;
   };
 }
 
@@ -300,23 +527,19 @@ export interface IEvaluationService {
 // 模板 ID 格式: evaluation-{functionMode}-{subMode}-{type}
 //
 // 示例:
-//   - evaluation-basic-system-original      (基础模式/系统提示词/原始评估)
-//   - evaluation-basic-system-optimized     (基础模式/系统提示词/优化评估)
+//   - evaluation-basic-system-result        (基础模式/系统提示词/单结果评估)
 //   - evaluation-basic-system-compare       (基础模式/系统提示词/对比评估)
 //   - evaluation-basic-system-prompt-only   (基础模式/系统提示词/仅提示词评估)
 //   - evaluation-basic-system-prompt-iterate(基础模式/系统提示词/迭代需求评估)
-//   - evaluation-basic-user-original        (基础模式/用户提示词/原始评估)
-//   - evaluation-basic-user-optimized       (基础模式/用户提示词/优化评估)
+//   - evaluation-basic-user-result          (基础模式/用户提示词/单结果评估)
 //   - evaluation-basic-user-compare         (基础模式/用户提示词/对比评估)
 //   - evaluation-basic-user-prompt-only     (基础模式/用户提示词/仅提示词评估)
 //   - evaluation-basic-user-prompt-iterate  (基础模式/用户提示词/迭代需求评估)
-//   - evaluation-pro-multi-original         (Pro模式/多消息模式/原始评估)
-//   - evaluation-pro-multi-optimized        (Pro模式/多消息模式/优化评估)
+//   - evaluation-pro-multi-result           (Pro模式/多消息模式/单结果评估)
 //   - evaluation-pro-multi-compare          (Pro模式/多消息模式/对比评估)
 //   - evaluation-pro-multi-prompt-only      (Pro模式/多消息模式/仅提示词评估)
 //   - evaluation-pro-multi-prompt-iterate   (Pro模式/多消息模式/迭代需求评估)
-//   - evaluation-pro-variable-original      (Pro模式/变量模式/原始评估)
-//   - evaluation-pro-variable-optimized     (Pro模式/变量模式/优化评估)
+//   - evaluation-pro-variable-result        (Pro模式/变量模式/单结果评估)
 //   - evaluation-pro-variable-compare       (Pro模式/变量模式/对比评估)
 //   - evaluation-pro-variable-prompt-only   (Pro模式/变量模式/仅提示词评估)
 //   - evaluation-pro-variable-prompt-iterate(Pro模式/变量模式/迭代需求评估)

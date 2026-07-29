@@ -643,6 +643,7 @@ import {
   NGrid, NGridItem, NEl
 } from 'naive-ui'
 import { TemplateProcessor, type Template, type MessageTemplate, type ITemplateManager, TemplateLanguageService } from '@prompt-optimizer/core'
+import { useConfirmDialog } from '../composables/ui/useConfirmDialog'
 import { useToast } from '../composables/ui/useToast'
 import MarkdownRenderer from './MarkdownRenderer.vue'
 import BuiltinTemplateLanguageSwitch from './BuiltinTemplateLanguageSwitch.vue'
@@ -654,8 +655,10 @@ import { useProMultiMessageSession } from '../stores/session/useProMultiMessageS
 import { useProVariableSession } from '../stores/session/useProVariableSession'
 import { useImageText2ImageSession } from '../stores/session/useImageText2ImageSession'
 import { useImageImage2ImageSession } from '../stores/session/useImageImage2ImageSession'
+import { useImageMultiImageSession } from '../stores/session/useImageMultiImageSession'
 
 const { t } = useI18n()
+const confirmDialog = useConfirmDialog()
 
 interface Services {
   templateManager: ITemplateManager;
@@ -678,6 +681,7 @@ const props = defineProps<{
     | 'iterate'
     | 'text2imageOptimize'
     | 'image2imageOptimize'
+    | 'multiimageOptimize'
     | 'imageIterate'
     | 'conversationMessageOptimize'
     | 'contextUserOptimize'
@@ -685,7 +689,7 @@ const props = defineProps<{
   show: boolean
   basicSubMode?: 'system' | 'user'
   proSubMode?: 'multi' | 'variable'
-  imageSubMode?: 'text2image' | 'image2image'
+  imageSubMode?: 'text2image' | 'image2image' | 'multiimage'
 }>()
 
 const emit = defineEmits(['close', 'select', 'update:show', 'languageChanged'])
@@ -698,6 +702,7 @@ const proMultiMessageSession = useProMultiMessageSession()
 const proVariableSession = useProVariableSession()
 const imageText2ImageSession = useImageText2ImageSession()
 const imageImage2ImageSession = useImageImage2ImageSession()
+const imageMultiImageSession = useImageMultiImageSession()
 
 const templates = ref<Template[]>([])
 const currentCategory = ref(getCategoryFromProps())
@@ -760,6 +765,8 @@ function getCategoryFromProps() {
       return 'image-text2image-optimize'
     case 'image2imageOptimize':
       return 'image-image2image-optimize'
+    case 'multiimageOptimize':
+      return 'image-multiimage-optimize'
     case 'imageIterate':
       return 'image-iterate'
     case 'conversationMessageOptimize':
@@ -774,7 +781,7 @@ function getCategoryFromProps() {
 }
 
 // 获取当前模板类型 - 根据当前分类而不是props
-function getCurrentTemplateType(): 'optimize' | 'userOptimize' | 'iterate' | 'text2imageOptimize' | 'image2imageOptimize' | 'imageIterate' | 'conversationMessageOptimize' | 'contextUserOptimize' | 'contextIterate' {
+function getCurrentTemplateType(): 'optimize' | 'userOptimize' | 'iterate' | 'text2imageOptimize' | 'image2imageOptimize' | 'multiimageOptimize' | 'imageIterate' | 'conversationMessageOptimize' | 'contextUserOptimize' | 'contextIterate' {
   switch (currentCategory.value) {
     case 'system-optimize':
       return 'optimize'
@@ -787,6 +794,8 @@ function getCurrentTemplateType(): 'optimize' | 'userOptimize' | 'iterate' | 'te
       return 'text2imageOptimize'
     case 'image-image2image-optimize':
       return 'image2imageOptimize'
+    case 'image-multiimage-optimize':
+      return 'multiimageOptimize'
     case 'image-iterate':
       return 'imageIterate'
     case 'context-system-optimize':
@@ -823,9 +832,13 @@ function getSelectedTemplateIdForCategory(category: string): string | undefined 
       return imageText2ImageSession.selectedTemplateId || undefined
     case 'image-image2image-optimize':
       return imageImage2ImageSession.selectedTemplateId || undefined
+    case 'image-multiimage-optimize':
+      return imageMultiImageSession.selectedTemplateId || undefined
     case 'image-iterate':
       return props.imageSubMode === 'image2image'
         ? (imageImage2ImageSession.selectedIterateTemplateId || undefined)
+        : props.imageSubMode === 'multiimage'
+          ? (imageMultiImageSession.selectedIterateTemplateId || undefined)
         : (imageText2ImageSession.selectedIterateTemplateId || undefined)
     default:
       return undefined
@@ -851,6 +864,8 @@ function getCurrentCategoryLabel() {
       return t('templateManager.imageText2ImageTemplates')
     case 'image-image2image-optimize':
       return t('templateManager.imageImage2ImageTemplates')
+    case 'image-multiimage-optimize':
+      return t('imageMode.multiimage')
     case 'image-iterate':
       return t('templateManager.imageIterateTemplates')
     case 'context-system-optimize':
@@ -902,10 +917,10 @@ const loadTemplates = async () => {
     // 统一使用异步方法
     const allTemplates = await getTemplateManager.value.listTemplates()
     templates.value = allTemplates
-    console.log('加载到的提示词:', templates.value)
+    console.log('Loaded templates:', templates.value)
   } catch (error) {
-    console.error('加载提示词失败:', error)
-    toast.error('加载提示词失败')
+    console.error('Failed to load templates:', error)
+    toast.error(t('toast.error.loadTemplatesFailed'))
   }
 }
 
@@ -1167,23 +1182,29 @@ const handleSubmit = async () => {
     toast.success(editingTemplate.value ? t('template.success.updated') : t('template.success.added'))
     cancelEdit()
   } catch (error) {
-    console.error('保存提示词失败:', error)
+    console.error('Failed to save template:', error)
     toast.error(t('template.error.saveFailed'))
   }
 }
 
 // 确认删除
 const confirmDelete = async (templateId: string) => {
-  if (confirm(t('template.deleteConfirm'))) {
-    try {
-      await getTemplateManager.value.deleteTemplate(templateId)
-      await loadTemplates()
+  const confirmed = await confirmDialog.warning({
+    title: t('common.warning'),
+    content: t('template.deleteConfirm'),
+    positiveText: t('common.confirm'),
+    negativeText: t('common.cancel'),
+  })
+  if (!confirmed) return
 
-      toast.success(t('template.success.deleted'))
-    } catch (error) {
-      console.error('删除提示词失败:', error)
-      toast.error(t('template.error.deleteFailed'))
-    }
+  try {
+    await getTemplateManager.value.deleteTemplate(templateId)
+    await loadTemplates()
+
+    toast.success(t('template.success.deleted'))
+  } catch (error) {
+    console.error('Failed to delete template:', error)
+    toast.error(t('template.error.deleteFailed'))
   }
 }
 
@@ -1222,7 +1243,7 @@ const copyTemplate = (template: Template) => {
   const isAdvanced = Array.isArray(template.content)
 
   form.value = {
-    name: `${template.name} - 副本`,
+    name: `${template.name} - Copy`,
     content: isAdvanced ? '' : template.content as string,
     description: template.metadata.description || '',
     isAdvanced,
@@ -1259,6 +1280,8 @@ const filteredTemplates = computed(() => {
         return templateType === 'text2imageOptimize'
       case 'image-image2image-optimize':
         return templateType === 'image2imageOptimize'
+      case 'image-multiimage-optimize':
+        return templateType === 'multiimageOptimize'
       case 'image-iterate':
         return templateType === 'imageIterate'
 

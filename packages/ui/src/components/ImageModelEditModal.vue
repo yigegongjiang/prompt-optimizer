@@ -25,13 +25,14 @@
           <NH4 style="margin: 0 0 12px 0; font-size: 14px;">{{ t('image.provider.section') }}</NH4>
 
           <NFormItem :label="t('image.provider.label')">
-            <NSelect
+            <ProviderPillSelect
               v-model:value="configForm.providerId"
               :options="providerOptions"
-              :placeholder="t('image.provider.placeholder')"
               :loading="isLoadingProviders"
+              :aria-label="t('image.provider.label')"
+              :more-label="t('modelManager.provider.more')"
+              :label-overrides="providerLabelOverrides"
               @update:value="onProviderChange"
-              required
             />
           </NFormItem>
 
@@ -114,29 +115,30 @@
                 @update:value="handleModelChange"
               />
 
-              <NTooltip :disabled="canRefreshModels" :show-arrow="false">
-                <template #trigger>
-                  <NButton
-                    @click="refreshModels"
-                    :loading="isLoadingModels"
-                    :disabled="!canRefreshModels"
-                    circle
-                    secondary
-                    type="primary"
-                    size="small"
-                    style="flex-shrink: 0;"
-                  >
-                    <template #icon>
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 14px; height: 14px;">
-                        <polyline points="23 4 23 10 17 10"/>
-                        <polyline points="1 20 1 14 7 14"/>
-                        <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/>
-                      </svg>
-                    </template>
-                  </NButton>
-                </template>
-                {{ refreshButtonTooltip }}
-              </NTooltip>
+              <ThemedTooltip
+                :label="refreshButtonTooltip"
+                :disabled="canRefreshModels"
+                :show-arrow="false"
+              >
+                <NButton
+                  @click="refreshModels"
+                  :loading="isLoadingModels"
+                  :disabled="!canRefreshModels"
+                  circle
+                  secondary
+                  type="primary"
+                  size="small"
+                  style="flex-shrink: 0;"
+                >
+                  <template #icon>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 14px; height: 14px;">
+                      <polyline points="23 4 23 10 17 10"/>
+                      <polyline points="1 20 1 14 7 14"/>
+                      <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/>
+                    </svg>
+                  </template>
+                </NButton>
+              </ThemedTooltip>
             </NSpace>
           </NFormItem>
 
@@ -202,13 +204,13 @@
           </NTag>
 
           <!-- 测试结果图片缩略图 -->
-          <NImage
+          <AppPreviewImage
             v-if="testResult?.image && connectionStatus?.type === 'success'"
             :src="testResult.image.url || (testResult.image.b64?.startsWith('data:') ? testResult.image.b64 : `data:image/png;base64,${testResult.image.b64}`)"
             width="32"
             height="32"
             object-fit="cover"
-            :style="{ borderRadius: '4px', border: '1px solid #d9d9d9' }"
+            :style="{ borderRadius: '4px', border: '1px solid var(--n-border-color)' }"
             :preview-disabled="false"
             :alt="t('image.connection.testImagePreview')"
           />
@@ -237,14 +239,17 @@ import { computed, watch, nextTick, h } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   NModal, NSpace, NInput, NInputNumber,
-  NCheckbox, NSelect, NButton, NTag, NTooltip, NText,
-  NDivider, NH4, NForm, NFormItem, NImage, useDialog
+  NCheckbox, NSelect, NButton, NTag, NText,
+  NDivider, NH4, NForm, NFormItem, useDialog
 } from 'naive-ui'
 import { useImageModelManager } from '../composables/model/useImageModelManager'
 import { useToast } from '../composables/ui/useToast'
 import { isRunningInElectron, type ImageModelConfig } from '@prompt-optimizer/core'
 import ModelAdvancedSection from './ModelAdvancedSection.vue'
+import ProviderPillSelect from './ProviderPillSelect.vue'
 import ExternalLinkIcon from './icons/ExternalLinkIcon.vue'
+import AppPreviewImage from './media/AppPreviewImage.vue'
+import ThemedTooltip from './common/ThemedTooltip.vue'
 
 
 const { t } = useI18n()
@@ -255,6 +260,7 @@ const dialog = useDialog()
 const props = defineProps<{
   show: boolean
   configId?: string
+  initialConfig?: ImageModelConfig
 }>()
 
 // Emits
@@ -342,6 +348,10 @@ const providerOptions = computed(() =>
   }))
 )
 
+const providerLabelOverrides = computed(() => ({
+  'openai-compatible': t('modelManager.provider.openaiCompatibleCustomLabel')
+}))
+
 const modelOptions = computed(() =>
   models.value.map(m => ({
     label: m.id,
@@ -418,6 +428,39 @@ const canSave = computed(() => {
          isConnectionConfigured.value
 })
 
+const applyDraftConfig = async (draft: ImageModelConfig) => {
+  configForm.value = JSON.parse(JSON.stringify({
+    ...draft,
+    id: '',
+    paramOverrides: draft.paramOverrides || {}
+  })) as ImageModelConfig
+  selectedProviderId.value = draft.providerId
+  selectedModelId.value = draft.modelId
+  await handleProviderChange(draft.providerId, {
+    autoSelectFirstModel: false,
+    resetOverrides: false,
+    resetConnectionConfig: false
+  })
+  await nextTick()
+}
+
+const loadExistingConfig = async (configId: string) => {
+  await loadConfigs()
+  const existing = configs.value.find(c => c.id === configId)
+  if (!existing) return
+
+  configForm.value = JSON.parse(JSON.stringify(existing)) as ImageModelConfig
+  configForm.value.paramOverrides = configForm.value.paramOverrides || {}
+  selectedProviderId.value = existing.providerId
+  selectedModelId.value = existing.modelId
+  await handleProviderChange(existing.providerId, {
+    autoSelectFirstModel: false,
+    resetOverrides: false,
+    resetConnectionConfig: false
+  })
+  await nextTick()
+}
+
 // 方法
 const close = () => {
   emit('update:show', false)
@@ -434,6 +477,9 @@ const resetFormData = () => {
     connectionConfig: {},
     paramOverrides: {}
   }
+  selectedProviderId.value = ''
+  selectedModelId.value = ''
+  models.value = []
   connectionStatus.value = null
   testResult.value = null
   modelLoadingStatus.value = null
@@ -479,7 +525,7 @@ const save = async () => {
     emit('saved')
     close()
   } catch (_error) {
-    console.error('保存配置失败:', _error)
+    console.error('[ImageModelEditModal] Failed to save config:', _error)
     toast.error(t('image.config.saveFailed'))
   }
 }
@@ -487,39 +533,17 @@ const save = async () => {
 // 监听 props 变化
 watch(() => props.show, async (newShow) => {
   if (newShow) {
-    // 打开时准备数据
     try {
-      // 确保提供商数据最新（每次打开都刷新）
       await loadProviders()
-      await loadConfigs()
       if (props.configId) {
-        const existing = configs.value.find(c => c.id === props.configId)
-        if (existing) {
-          // 先填充表单数据，确保 connectionConfig 可用
-          configForm.value = JSON.parse(JSON.stringify(existing)) as ImageModelConfig
-          configForm.value.paramOverrides = configForm.value.paramOverrides || {}
-          selectedProviderId.value = existing.providerId
-          selectedModelId.value = existing.modelId
-          // 然后再调用 handleProviderChange，此时 connectionConfig 已经可用
-          // 编辑模式：不自动选择第一个模型，不重置连接配置，保持已保存的数据
-          await handleProviderChange(existing.providerId, {
-            autoSelectFirstModel: false,
-            resetOverrides: false,
-            resetConnectionConfig: false
-          })
-          // 等待一帧以确保下拉可见
-          await nextTick()
-        }
+        await loadExistingConfig(props.configId)
+      } else if (props.initialConfig) {
+        await applyDraftConfig(props.initialConfig)
       } else {
-        // 新增模式：重置表单数据并自动选择第一个提供商和模型
         resetFormData()
-
-        // 自动选择第一个提供商
         if (providers.value.length > 0) {
           const firstProvider = providers.value[0]
           await handleProviderChange(firstProvider.id)
-
-          // 等待模型加载完成后自动选择第一个模型
           await nextTick()
           if (models.value.length > 0) {
             const firstModel = models.value[0]
@@ -528,37 +552,26 @@ watch(() => props.show, async (newShow) => {
         }
       }
     } catch (e) {
-      console.error('加载配置失败:', e)
+      console.error('[ImageModelEditModal] Failed to load config:', e)
     }
   } else {
     resetFormData()
   }
 })
 
-// 单独监听 configId 变化，处理动态更新的情况
-watch(() => props.configId, async (newConfigId) => {
-  // 只有在弹窗已经打开的情况下才处理
-  if (props.show && newConfigId) {
+watch(() => ({
+  configId: props.configId,
+  initialConfig: props.initialConfig
+}), async ({ configId, initialConfig }) => {
+  if (props.show && (configId || initialConfig)) {
     try {
-      await loadConfigs()
-      const existing = configs.value.find(c => c.id === newConfigId)
-      if (existing) {
-        // 先填充表单数据，确保 connectionConfig 可用
-        configForm.value = JSON.parse(JSON.stringify(existing)) as ImageModelConfig
-        configForm.value.paramOverrides = configForm.value.paramOverrides || {}
-        selectedProviderId.value = existing.providerId
-        selectedModelId.value = existing.modelId
-        // 然后再调用 handleProviderChange，此时 connectionConfig 已经可用
-        // 编辑模式：不自动选择第一个模型，不重置连接配置，保持已保存的数据
-        await handleProviderChange(existing.providerId, {
-          autoSelectFirstModel: false,
-          resetOverrides: false,
-          resetConnectionConfig: false
-        })
-        await nextTick()
+      if (configId) {
+        await loadExistingConfig(configId)
+      } else if (initialConfig) {
+        await applyDraftConfig(initialConfig)
       }
     } catch (e) {
-      console.error('处理 configId 变化失败:', e)
+      console.error('[ImageModelEditModal] Failed to process modal data changes:', e)
     }
   }
 }, { immediate: true })

@@ -36,6 +36,19 @@ export class AppError extends Error {
   }
 }
 
+function isObjectString(value: string): boolean {
+  return /^\[object .+\]$/.test(value)
+}
+
+function stringifyUnknownObject(value: unknown, fallback: string): string {
+  try {
+    const serialized = JSON.stringify(value)
+    return serialized && !isObjectString(serialized) ? serialized : fallback
+  } catch {
+    return fallback
+  }
+}
+
 /**
  * 从未知类型的错误中提取错误消息
  * @param error - 未知类型的错误对象
@@ -44,10 +57,20 @@ export class AppError extends Error {
  */
 export function getErrorMessage(error: unknown, fallback = 'Unknown error'): string {
   if (error instanceof Error) {
-    return error.message
+    const message = error.message?.trim()
+    if (message && !isObjectString(message)) {
+      return message
+    }
+
+    const cause = (error as Error & { cause?: unknown }).cause
+    if (cause !== undefined) {
+      return getErrorMessage(cause, fallback)
+    }
+
+    return message || fallback
   }
   if (typeof error === 'string') {
-    return error
+    return error.trim() && !isObjectString(error.trim()) ? error : fallback
   }
   if (error === null || error === undefined) {
     return fallback
@@ -57,8 +80,30 @@ export function getErrorMessage(error: unknown, fallback = 'Unknown error'): str
   if (typeof error === 'object') {
     const maybeMessage = (error as { message?: unknown }).message
     if (typeof maybeMessage === 'string' && maybeMessage.trim()) {
-      return maybeMessage
+      return isObjectString(maybeMessage.trim()) ? fallback : maybeMessage
     }
+
+    if (maybeMessage !== undefined && maybeMessage !== error) {
+      return getErrorMessage(maybeMessage, fallback)
+    }
+
+    const maybeError = (error as { error?: unknown }).error
+    if (maybeError !== undefined && maybeError !== error) {
+      return getErrorMessage(maybeError, fallback)
+    }
+
+    const status = (error as { status?: unknown; statusCode?: unknown; response?: { status?: unknown } }).status
+      ?? (error as { statusCode?: unknown }).statusCode
+      ?? (error as { response?: { status?: unknown } }).response?.status
+    const body = (error as { body?: unknown; data?: unknown; response?: { data?: unknown } }).body
+      ?? (error as { data?: unknown }).data
+      ?? (error as { response?: { data?: unknown } }).response?.data
+    if (status !== undefined) {
+      const detail = body !== undefined && body !== error ? getErrorMessage(body, '') : ''
+      return detail ? `HTTP ${String(status)}: ${detail}` : `HTTP ${String(status)} error`
+    }
+
+    return stringifyUnknownObject(error, fallback)
   }
 
   try {
@@ -70,6 +115,30 @@ export function getErrorMessage(error: unknown, fallback = 'Unknown error'): str
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function hasReadableErrorShape(value: Record<string, unknown>): boolean {
+  return (
+    'message' in value ||
+    'error' in value ||
+    'status' in value ||
+    'statusCode' in value ||
+    'response' in value ||
+    'code' in value
+  )
+}
+
+function normalizeI18nParams(params: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!params) return undefined
+
+  return Object.fromEntries(
+    Object.entries(params).map(([key, value]) => [
+      key,
+      isRecord(value) || Array.isArray(value)
+        ? getErrorMessage(value, stringifyUnknownObject(value, 'Unknown error'))
+        : value,
+    ])
+  )
 }
 
 /**
@@ -91,7 +160,7 @@ export function getI18nErrorMessage(error: unknown, fallback = 'Unknown error'):
     const hasKey = i18n.global.te(code)
     if (hasKey) {
       try {
-        return i18n.global.t(code, params ?? {})
+        return i18n.global.t(code, normalizeI18nParams(params) ?? {})
       } catch {
         // If interpolation fails for any reason, fall back to raw error message.
       }
@@ -106,6 +175,32 @@ export function getI18nErrorMessage(error: unknown, fallback = 'Unknown error'):
   }
 
   return message
+}
+
+export function formatErrorSummary(summary: string, error: unknown, fallback = 'Unknown error'): string {
+  const normalizedSummary = summary.trim()
+  const detail = getI18nErrorMessage(error, fallback).trim()
+  const suppressPlainObjectDetail =
+    isRecord(error) &&
+    !(error instanceof Error) &&
+    !Array.isArray(error) &&
+    !hasReadableErrorShape(error)
+  const hasMeaningfulDetail =
+    !suppressPlainObjectDetail &&
+    detail &&
+    detail !== fallback &&
+    detail !== normalizedSummary &&
+    !/^\[object .+\]$/.test(detail)
+
+  if (!normalizedSummary) {
+    return detail || fallback
+  }
+
+  if (!hasMeaningfulDetail) {
+    return normalizedSummary
+  }
+
+  return `${normalizedSummary}: ${detail}`
 }
 
 
@@ -211,9 +306,9 @@ export function createErrorHandler(context: string) {
 
   return {
     handleError(error: unknown) {
-      console.error(`[${context}]错误:`, error)
+      console.error(`[${context}] Error:`, error)
 
-      toast.error(getI18nErrorMessage(error, `${context}过程中发生未知错误`))
+      toast.error(getI18nErrorMessage(error, 'An unexpected error occurred'))
     }
   }
 }
@@ -246,9 +341,9 @@ export function logErrorInDev(context: string, error: unknown): void {
  * 预定义错误消息常量
  */
 export const errorMessages = {
-  SERVICE_NOT_INITIALIZED: '服务未初始化，请稍后重试',
-  TEMPLATE_NOT_SELECTED: '请先选择提示词模板',
-  INCOMPLETE_TEST_INFO: '请填写完整的测试信息',
-  LOAD_TEMPLATE_FAILED: '加载提示词失败',
-  CLEAR_HISTORY_FAILED: '清空历史记录失败'
+  SERVICE_NOT_INITIALIZED: 'Service not initialized. Please try again later.',
+  TEMPLATE_NOT_SELECTED: 'Please select a prompt template first.',
+  INCOMPLETE_TEST_INFO: 'Please fill in the complete test information.',
+  LOAD_TEMPLATE_FAILED: 'Failed to load template.',
+  CLEAR_HISTORY_FAILED: 'Failed to clear history.'
 } as const 

@@ -1,10 +1,12 @@
 import { expect, type Page } from '@playwright/test'
+import { throwIfCurrentTestHasVCRFailure, waitForConditionOrVCRFailure } from './vcr'
 
 export type OptimizeWorkspaceMode =
   | 'basic-system'
   | 'basic-user'
   | 'image-text2image'
   | 'image-image2image'
+  | 'image-multiimage'
   | 'pro-variable'
   | 'pro-multi'
 
@@ -66,6 +68,15 @@ async function readOutputSourceText(output: import('@playwright/test').Locator) 
   try {
     const cmContent = root.locator('.cm-content')
     if ((await cmContent.count()) > 0) {
+      const lines = cmContent.first().locator('.cm-line')
+      if ((await lines.count()) > 0) {
+        const lineTexts = await lines.allInnerTexts()
+        const text = lineTexts.join('\n').trim()
+        if (text) {
+          return { kind: 'cm', text }
+        }
+      }
+
       return { kind: 'cm', text: (await cmContent.first().innerText()).trim() }
     }
   } catch {
@@ -98,37 +109,63 @@ async function readOutputSourceText(output: import('@playwright/test').Locator) 
   }
 }
 
+export async function readOutputByTestIdText(page: Page, testId: string): Promise<string> {
+  const output = page.locator(`[data-testid="${testId}"]:visible`)
+  await ensureOutputSourceView(output)
+  const { text } = await readOutputSourceText(output)
+  return text
+}
+
 export async function expectOutputByTestIdNotEmpty(page: Page, testId: string, opts?: { timeoutMs?: number }) {
   const output = page.locator(`[data-testid="${testId}"]:visible`)
   const timeoutMs = opts?.timeoutMs ?? 120000
 
+  throwIfCurrentTestHasVCRFailure()
   await ensureOutputSourceView(output)
 
-  await expect
-    .poll(async () => {
+  await waitForConditionOrVCRFailure(
+    async () => {
       const { text } = await readOutputSourceText(output).catch(() => ({ text: '' }))
-      return text
-    }, { timeout: timeoutMs })
-    .toMatch(/\S/)
+      return /\S/.test(text)
+    },
+    {
+      timeoutMs,
+      intervalMs: 120,
+      description: `output ${testId} should become non-empty`,
+    }
+  )
 }
 
 export async function expectOptimizedResultNotEmpty(page: Page, mode: OptimizeWorkspaceMode) {
   const workspace = getWorkspace(page, mode)
 
   const output = workspace.locator(`[data-testid="${mode}-output"]:visible`)
+  const optimizeButton = workspace.locator(`[data-testid="${mode}-optimize-button"]`)
+  const timeoutMs = 180000
 
   try {
+    throwIfCurrentTestHasVCRFailure()
     await ensureOutputSourceView(output)
 
-    await expect
-      .poll(async () => {
+    await waitForConditionOrVCRFailure(
+      async () => {
         const { text } = await readOutputSourceText(output).catch(() => ({ text: '' }))
-        return text
-      }, { timeout: 120000 })
-      .toMatch(/\S/)
+        return /\S/.test(text)
+      },
+      {
+        timeoutMs,
+        intervalMs: 120,
+        description: `${mode} optimized output should become non-empty`,
+      }
+    )
+
+    // 文本开始流出并不代表优化已完成；尤其是 pro-multi 左侧分析会在流式收尾阶段重建按钮节点。
+    // 这里补一层“优化按钮重新可用”的等待，确保后续点击分析/测试时已经脱离 streaming 状态。
+    if ((await optimizeButton.count()) > 0) {
+      await expect(optimizeButton).toBeEnabled({ timeout: timeoutMs })
+    }
   } catch (e) {
     const buttonInfo = await (async () => {
-      const optimizeButton = workspace.locator(`[data-testid="${mode}-optimize-button"]`)
       try {
         const visible = await optimizeButton.isVisible()
         const enabled = await optimizeButton.isEnabled()
@@ -162,12 +199,13 @@ export async function expectOptimizedResultNotEmpty(page: Page, mode: OptimizeWo
     }
 
     // eslint-disable-next-line no-console
-    console.error('[E2E][optimize] output wait timeout diagnostic:', JSON.stringify(debugPayload, null, 2))
+    console.error('[E2E][optimize] output wait failure diagnostic:', JSON.stringify(debugPayload, null, 2))
     throw e
   }
 }
 
 export async function verifyOptimizeButtonDisabledWhenEmpty(page: Page, mode: OptimizeWorkspaceMode) {
+  throwIfCurrentTestHasVCRFailure()
   const workspace = getWorkspace(page, mode)
   const button = workspace.locator(`[data-testid="${mode}-optimize-button"]`)
 
@@ -176,9 +214,14 @@ export async function verifyOptimizeButtonDisabledWhenEmpty(page: Page, mode: Op
 }
 
 export async function addProMultiUserMessage(page: Page, content: string) {
-  const addButton = page.getByTestId('pro-multi-add-message').first()
-  await expect(addButton).toBeVisible({ timeout: 20000 })
-  await addButton.click()
+  const firstAddButton = page.getByTestId('pro-multi-add-first-message').first()
+  if (await firstAddButton.isVisible().catch(() => false)) {
+    await firstAddButton.click()
+  } else {
+    const addButton = page.getByTestId('pro-multi-add-message').first()
+    await expect(addButton).toBeVisible({ timeout: 20000 })
+    await addButton.click()
+  }
 
   // 新增消息后，列表最后一项应该出现
   // 我们给 message card 加了 data-testid=pro-multi-message-card-{index}

@@ -11,14 +11,28 @@
  * @param optimizationMode - 优化模式（'system' | 'user'）
  * @param templateType - 优化模板类型（'optimize' | 'userOptimize'）
  */
-import { ref, computed, type Ref, type ComputedRef } from 'vue'
+import { ref, computed, watch, type Ref, type ComputedRef } from 'vue'
 import type { AppServices } from '../../types/services'
-import type { OptimizationRequest, PromptRecord, PromptRecordChain, PromptRecordType } from '@prompt-optimizer/core'
+import type {
+  OptimizationRequest,
+  PromptAssetBinding,
+  PromptRecord,
+  PromptRecordChain,
+  PromptRecordType,
+  PromptSessionOrigin,
+} from '@prompt-optimizer/core'
 import { v4 as uuidv4 } from 'uuid'
 import { useToast } from '../ui/useToast'
 import { useI18n } from 'vue-i18n'
 import { getI18nErrorMessage } from '../../utils/error'
 import type { IteratePayload } from '../../types/workspace'
+import { withHistorySourceBindingMetadata } from '../../utils/history-source-binding'
+
+const isHistoryRecordNotFoundError = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') return false
+  const code = 'code' in error ? (error as { code?: unknown }).code : undefined
+  return code === 'error.history.record_not_found'
+}
 
 type BasicSessionStore = {
   prompt: string
@@ -27,12 +41,6 @@ type BasicSessionStore = {
   chainId: string
   versionId: string
   testContent: string
-  testResults: {
-    originalResult: string
-    originalReasoning: string
-    optimizedResult: string
-    optimizedReasoning: string
-  } | null
   selectedOptimizeModelKey: string
   selectedTestModelKey: string
   selectedTemplateId: string | null
@@ -46,16 +54,15 @@ type BasicSessionStore = {
     versionId: string
   }) => void
   updateTestContent: (content: string) => void
-  updateTestResults: (results: {
-    originalResult: string
-    originalReasoning: string
-    optimizedResult: string
-    optimizedReasoning: string
-  } | null) => void
   updateOptimizeModel: (key: string) => void
   updateTestModel: (key: string) => void
   updateTemplate: (id: string | null) => void
   updateIterateTemplate: (id: string | null) => void
+  clearAssetBinding?: () => void
+  clearContent: () => void
+  saveSession?: () => Promise<void> | void
+  assetBinding?: PromptAssetBinding
+  origin?: PromptSessionOrigin
 }
 
 interface UseBasicWorkspaceLogicOptions {
@@ -76,8 +83,6 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
   // 过程态状态
   const isOptimizing = ref(false)
   const isIterating = ref(false)
-  const isTestingOriginal = ref(false)
-  const isTestingOptimized = ref(false)
 
   // 历史管理专用 ref（不写入 session store）
   const currentChainId = ref('')
@@ -119,16 +124,16 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
     set: (value) => sessionStore.updateTestContent(value || '')
   })
 
-  const testResults = computed<BasicSessionStore['testResults']>({
-    get: () => {
-      // ✅ 关键修复：始终返回 sessionStore.testResults（即使是 null/undefined）
-      // 避免返回临时对象导致响应式追踪失效
-      return sessionStore.testResults
-    },
-    set: (value) => {
-      sessionStore.updateTestResults(value)
+  const saveSessionSnapshot = async (reason: string) => {
+    if (!sessionStore.saveSession) return
+
+    try {
+      await sessionStore.saveSession()
+    } catch (error) {
+      console.error(`[useBasicWorkspaceLogic] Failed to save session after ${reason}:`, error)
+      toast.warning(t('toast.warning.saveHistoryFailed'))
     }
-  })
+  }
 
   const selectedOptimizeModelKey = computed<string>({
     get: () => sessionStore.selectedOptimizeModelKey || '',
@@ -178,7 +183,7 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
 
     isOptimizing.value = true
 
-    // 清理历史绑定，避免“旧 chainId/versionId”污染本次优化过程态
+    // 新优化会重置当前历史链，但保留 session 的来源资产坐标，供新历史链回溯收藏来源。
     sessionStore.updateOptimizedResult({
       optimizedPrompt: '',
       reasoning: '',
@@ -213,10 +218,10 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
                 modelKey,
                 templateId,
                 timestamp: Date.now(),
-                metadata: {
+                metadata: withHistorySourceBindingMetadata({
                   optimizationMode,
                   functionMode: 'basic'
-                }
+                }, sessionStore)
               }
 
               const chain = await historyManager.createNewChain(recordData)
@@ -230,11 +235,12 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
                 chainId: chain.chainId,
                 versionId: chain.currentRecord.id
               })
+              await saveSessionSnapshot('optimization commit')
 
               onOptimizeComplete?.(chain)
               toast.success(t('toast.success.optimizeSuccess'))
             } catch (error) {
-              console.error('[useBasicWorkspaceLogic] 创建历史记录失败:', error)
+              console.error('[useBasicWorkspaceLogic] Failed to create the history record:', error)
               currentVersions.value = []
               currentChainId.value = ''
               currentVersionId.value = ''
@@ -350,7 +356,7 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
                     modelKey,
                     templateId: iterateTemplateId,
                     timestamp: Date.now(),
-                    metadata: { optimizationMode, functionMode: 'basic' },
+                    metadata: withHistorySourceBindingMetadata({ optimizationMode, functionMode: 'basic' }, sessionStore),
                   })
 
               currentChainId.value = chain.chainId
@@ -363,11 +369,12 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
                 chainId: chain.chainId,
                 versionId: chain.currentRecord.id
               })
+              await saveSessionSnapshot('iteration commit')
 
               onIterateComplete?.(chain)
               toast.success(t('toast.success.iterateComplete'))
             } catch (error) {
-              console.error('[useBasicWorkspaceLogic] 保存迭代记录失败:', error)
+              console.error('[useBasicWorkspaceLogic] Failed to save the iteration record:', error)
               currentVersions.value = []
               currentChainId.value = ''
               currentVersionId.value = ''
@@ -412,124 +419,6 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
   }
 
   /**
-   * 3. 测试提示词
-   */
-  const handleTest = async (_testVariables?: Record<string, string>) => {
-    void _testVariables
-    if (!optimizedPrompt.value?.trim()) {
-      toast.error(t('prompt.error.noOptimizedPrompt'))
-      return
-    }
-
-    const promptService = services.value?.promptService
-    if (!promptService) {
-      toast.error(t('toast.error.serviceInit'))
-      return
-    }
-
-    const modelKey = selectedTestModelKey.value
-    if (!modelKey) {
-      toast.error(t('toast.error.noTestModel'))
-      return
-    }
-
-    const isCompareMode = !!sessionStore.isCompareMode
-    const testInput = testContent.value || ''
-
-    // system 模式：必须有测试输入
-    if (optimizationMode === 'system' && !testInput.trim()) {
-      toast.error(t('test.simpleMode.help'))
-      return
-    }
-
-    // 🔧 先清空 session store 的 testResults（避免旧数据影响新测试）
-    sessionStore.updateTestResults(null)
-
-    // 初始化测试结果
-    testResults.value = {
-      originalResult: '',
-      originalReasoning: '',
-      optimizedResult: '',
-      optimizedReasoning: ''
-    }
-
-    try {
-      // 对比模式：先测试原始提示词
-      if (isCompareMode) {
-        isTestingOriginal.value = true
-        const systemPrompt = optimizationMode === 'system' ? prompt.value : ''
-        const userPrompt = optimizationMode === 'system' ? testInput : prompt.value
-        await promptService.testPromptStream(
-          systemPrompt,
-          userPrompt,
-          modelKey,
-          {
-            onToken: (token: string) => {
-              testResults.value = {
-                ...(testResults.value || { originalResult: '', originalReasoning: '', optimizedResult: '', optimizedReasoning: '' }),
-                originalResult: ((testResults.value?.originalResult) || '') + token
-              }
-            },
-            onReasoningToken: (token: string) => {
-              testResults.value = {
-                ...(testResults.value || { originalResult: '', originalReasoning: '', optimizedResult: '', optimizedReasoning: '' }),
-                originalReasoning: ((testResults.value?.originalReasoning) || '') + token
-              }
-            },
-            onComplete: () => {
-              isTestingOriginal.value = false
-            },
-            onError: (error: Error) => {
-              throw error
-            }
-          }
-        )
-      }
-
-      // 测试优化后的提示词
-      isTestingOptimized.value = true
-      const optimizedSystemPrompt = optimizationMode === 'system' ? optimizedPrompt.value : ''
-      const optimizedUserPrompt = optimizationMode === 'system' ? testInput : optimizedPrompt.value
-      await promptService.testPromptStream(
-        optimizedSystemPrompt,
-        optimizedUserPrompt,
-        modelKey,
-        {
-          onToken: (token: string) => {
-              testResults.value = {
-                ...(testResults.value || { originalResult: '', originalReasoning: '', optimizedResult: '', optimizedReasoning: '' }),
-                optimizedResult: ((testResults.value?.optimizedResult) || '') + token
-              }
-          },
-          onReasoningToken: (token: string) => {
-              testResults.value = {
-                ...(testResults.value || { originalResult: '', originalReasoning: '', optimizedResult: '', optimizedReasoning: '' }),
-                optimizedReasoning: ((testResults.value?.optimizedReasoning) || '') + token
-              }
-          },
-          onComplete: () => {
-            toast.success(t('toast.success.testComplete'))
-          },
-          onError: (error: Error) => {
-            throw error
-          }
-        }
-      )
-    } catch (error) {
-      const fallback = t('toast.error.testFailed')
-      const detail = getI18nErrorMessage(error, fallback)
-      if (detail === fallback) {
-        toast.error(fallback)
-      } else {
-        toast.error(`${fallback}: ${detail}`)
-      }
-    } finally {
-      isTestingOriginal.value = false
-      isTestingOptimized.value = false
-    }
-  }
-
-  /**
    * 3.5 保存本地编辑为新版本（不触发 LLM）
    * - 将当前编辑后的 optimizedPrompt 写入历史链
    * - 清空 reasoning（避免误用旧的推理内容）
@@ -565,12 +454,12 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
             modelKey,
             templateId,
             iterationNote: note,
-            metadata: {
+            metadata: withHistorySourceBindingMetadata({
               optimizationMode,
               functionMode: 'basic',
               localEdit: true,
               localEditSource: payload.source || 'manual',
-            },
+            }, sessionStore),
           })
         : await historyManager.createNewChain({
             id: uuidv4(),
@@ -580,12 +469,12 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
             modelKey,
             templateId,
             timestamp: Date.now(),
-            metadata: {
+            metadata: withHistorySourceBindingMetadata({
               optimizationMode,
               functionMode: 'basic',
               localEdit: true,
               localEditSource: payload.source || 'manual',
-            },
+            }, sessionStore),
           })
 
       currentChainId.value = chain.chainId
@@ -598,11 +487,12 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
         chainId: chain.chainId,
         versionId: chain.currentRecord.id,
       })
+      await saveSessionSnapshot('local edit commit')
 
       onLocalEditComplete?.(chain)
       toast.success(t('toast.success.localEditSaved'))
     } catch (error) {
-      console.error('[useBasicWorkspaceLogic] 保存本地编辑失败:', error)
+      console.error('[useBasicWorkspaceLogic] Failed to save local edits:', error)
       toast.warning(t('toast.warning.saveHistoryFailed'))
     }
   }
@@ -623,6 +513,28 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
       reasoning: '',
       chainId: currentChainId.value || '',
       versionId: version.id
+    })
+  }
+
+  /**
+   * 4.1 切换到 V0（原始提示词）
+   * - 使用首个版本记录上的 originalPrompt 作为当前展示内容
+   * - V0 不是链上的真实版本，切换后要清空 currentVersionId / session.versionId，
+   *   避免继续继承某个版本上的 iterationNote 等元信息
+   */
+  const handleSwitchToV0 = (version: PromptRecord) => {
+    if (!version?.id || !version.originalPrompt) return
+
+    optimizedPrompt.value = version.originalPrompt
+    optimizedReasoning.value = ''
+    currentVersionId.value = ''
+    currentChainId.value = version.chainId || currentChainId.value || sessionStore.chainId || ''
+
+    sessionStore.updateOptimizedResult({
+      optimizedPrompt: version.originalPrompt,
+      reasoning: '',
+      chainId: currentChainId.value || '',
+      versionId: '',
     })
   }
 
@@ -652,12 +564,72 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
       currentChainId.value = chain.chainId
       currentVersionId.value = sessionStore.versionId || chain.currentRecord.id
     } catch (error) {
-      console.error('[useBasicWorkspaceLogic] 加载版本失败:', error)
+      console.error('[useBasicWorkspaceLogic] Failed to load versions:', error)
       currentVersions.value = []
       currentChainId.value = ''
       currentVersionId.value = ''
+
+      if (isHistoryRecordNotFoundError(error)) {
+        sessionStore.updateOptimizedResult({
+          optimizedPrompt: sessionStore.optimizedPrompt || '',
+          reasoning: sessionStore.reasoning || '',
+          chainId: '',
+          versionId: '',
+        })
+      }
     }
   }
+
+  /**
+   * 6. 分析提示词
+   * - 不写入历史记录
+   * - 只在当前工作区创建一个内存中的虚拟 V0
+   * - 清空当前历史链，避免旧 chain/version 继续影响下方版本区和右侧测试区
+   */
+  const handleAnalyze = () => {
+    if (!prompt.value?.trim()) return
+
+    const virtualV0Id = uuidv4()
+    const virtualV0: PromptRecordChain['versions'][number] = {
+      id: virtualV0Id,
+      chainId: '',
+      version: 0,
+      originalPrompt: prompt.value,
+      optimizedPrompt: prompt.value,
+      type: promptRecordType,
+      timestamp: Date.now(),
+      modelKey: '',
+      templateId: '',
+    }
+
+    currentChainId.value = ''
+    currentVersions.value = [virtualV0]
+    currentVersionId.value = virtualV0Id
+
+    sessionStore.updateOptimizedResult({
+      optimizedPrompt: prompt.value,
+      reasoning: '',
+      chainId: '',
+      versionId: '',
+    })
+  }
+
+  const clearContent = () => {
+    sessionStore.clearContent()
+    currentChainId.value = ''
+    currentVersions.value = []
+    currentVersionId.value = ''
+  }
+
+  watch(
+    () => [sessionStore.chainId, sessionStore.versionId, sessionStore.optimizedPrompt] as const,
+    ([chainId, versionId, optimized]) => {
+      if (chainId || versionId || optimized) return
+      currentChainId.value = ''
+      currentVersions.value = []
+      currentVersionId.value = ''
+    }
+  )
 
   return {
     // 状态代理
@@ -665,7 +637,6 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
     optimizedPrompt,
     optimizedReasoning,
     testContent,
-    testResults,
     selectedOptimizeModelKey,
     selectedTestModelKey,
     selectedTemplateId,
@@ -674,8 +645,6 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
     // 过程态
     isOptimizing,
     isIterating,
-    isTestingOriginal,
-    isTestingOptimized,
 
     // 历史管理
     currentChainId,
@@ -685,9 +654,11 @@ export function useBasicWorkspaceLogic(options: UseBasicWorkspaceLogicOptions) {
     // 业务逻辑
     handleOptimize,
     handleIterate,
-    handleTest,
     handleSaveLocalEdit,
     handleSwitchVersion,
-    loadVersions
+    handleSwitchToV0,
+    loadVersions,
+    handleAnalyze,
+    clearContent
   }
 }

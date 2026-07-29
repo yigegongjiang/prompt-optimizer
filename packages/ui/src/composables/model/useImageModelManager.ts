@@ -2,11 +2,12 @@ import { ref, computed, inject } from 'vue'
 
 import { useI18n } from 'vue-i18n'
 import { useToast } from '../ui/useToast'
-import { getI18nErrorMessage } from '../../utils/error'
+import { formatErrorSummary, getI18nErrorMessage } from '../../utils/error'
 import type {
   ImageProvider,
   ImageModel,
   ImageModelConfig,
+  ImageModelConfigInput,
   IImageAdapterRegistry,
   IImageModelManager,
   IImageService
@@ -19,8 +20,9 @@ type EditableImageModelConfig = Omit<ImageModelConfig, 'provider' | 'model'> & {
   model?: ImageModel
 }
 
-const toErrorMessage = (error: unknown): string => {
-  return getI18nErrorMessage(error, 'Unknown error')
+const toOptionalErrorDetail = (error: unknown, fallback = 'Unknown error'): string | undefined => {
+  const detail = getI18nErrorMessage(error, fallback)
+  return detail === fallback ? undefined : detail
 }
 
 export function useImageModelManager() {
@@ -196,10 +198,6 @@ export function useImageModelManager() {
   // 直接调用新接口
   const updateConfig = async (id: string, updates: Partial<ImageModelConfig>) => {
     await imageModelManager.updateConfig(id, updates)
-  }
-
-  const addConfig = async (config: ImageModelConfig) => {
-    await imageModelManager.addConfig(config)
   }
 
   const deleteConfig = async (id: string) => {
@@ -396,7 +394,7 @@ export function useImageModelManager() {
       return 'text2image'  // 两种都支持，优先文生图
     }
 
-    throw new Error('模型不支持任何图像生成功能')
+    throw new Error('This model does not support text-to-image or image-to-image generation')
   }
 
   const testConnection = async () => {
@@ -422,8 +420,8 @@ export function useImageModelManager() {
         if (detail.typeErrors.length) {
           parts.push(detail.typeErrors.map(e => t('image.connection.validation.invalidType', e)).join('; '))
         }
-        connectionStatus.value = { type: 'error', messageKey: 'image.connection.testFailed', detail: parts.join('；') }
-        toast.error(parts.join('；'))
+        connectionStatus.value = { type: 'error', messageKey: 'image.connection.testFailed', detail: parts.join('; ') }
+        toast.error(parts.join('; '))
         return
       }
 
@@ -435,7 +433,10 @@ export function useImageModelManager() {
           const adapter = registry.getAdapter(selectedProviderId.value)
           selectedModel = adapter.buildDefaultModel(configForm.value.modelId)
         } catch (error) {
-          throw new Error(`无法构建模型 ${configForm.value.modelId}: ${error instanceof Error ? error.message : String(error)}`)
+          throw new Error(
+            `Unable to build model ${configForm.value.modelId}: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error }
+          )
         }
       }
 
@@ -477,14 +478,13 @@ export function useImageModelManager() {
       toast.success(t('image.connection.testSuccess'))
 
     } catch (error) {
-      const message = toErrorMessage(error)
       console.error('Connection test failed:', error)
       connectionStatus.value = {
         type: 'error',
         messageKey: 'image.connection.testError',
-        detail: message
+        detail: toOptionalErrorDetail(error)
       }
-      toast.error(`${t('image.connection.testError')}: ${message}`)
+      toast.error(formatErrorSummary(t('image.connection.testError'), error))
     } finally {
       isTestingConnection.value = false
     }
@@ -502,7 +502,7 @@ export function useImageModelManager() {
       const parts: string[] = []
       if (detail.missing.length) parts.push(t('image.connection.validation.missing', { fields: detail.missing.join(', ') }))
       if (detail.typeErrors.length) parts.push(detail.typeErrors.map(e => t('image.connection.validation.invalidType', e)).join('; '))
-      modelLoadingStatus.value = { type: 'warning', messageKey: 'image.model.connectionRequired', detail: parts.join('；') }
+      modelLoadingStatus.value = { type: 'warning', messageKey: 'image.model.connectionRequired', detail: parts.join('; ') }
       return
     }
 
@@ -539,7 +539,7 @@ export function useImageModelManager() {
         type: 'warning',
         messageKey: 'image.model.dynamicFailed',
         count: staticModels.length,
-        detail: toErrorMessage(error)
+        detail: toOptionalErrorDetail(error)
       }
     } finally {
       isLoadingDynamicModels.value = false
@@ -604,11 +604,10 @@ export function useImageModelManager() {
     isSaving.value = true
 
     try {
-      // 从缓存中获取provider信息
       const cachedProvider = providers.value.find(p => p.id === selectedProviderId.value)
 
       if (!cachedProvider) {
-        throw new Error(`提供商不存在: ${selectedProviderId.value}`)
+        throw new Error(`Provider not found: ${selectedProviderId.value}`)
       }
 
       // 获取模型信息：优先使用缓存，不存在时通过registry构建
@@ -619,16 +618,18 @@ export function useImageModelManager() {
           const adapter = registry.getAdapter(selectedProviderId.value)
           cachedModel = adapter.buildDefaultModel(selectedModelId.value)
         } catch (error) {
-          throw new Error(`无法构建模型 ${selectedModelId.value}: ${error instanceof Error ? error.message : String(error)}`)
+          throw new Error(
+            `Unable to build model ${selectedModelId.value}: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error }
+          )
         }
       }
 
-      // 组装完整的自包含配置
-      const completeConfig: ImageModelConfig = {
+      // Manager owns authoritative provider/model metadata resolution.
+      const completeConfig: ImageModelConfigInput = {
         ...configForm.value,
-        // 嵌入完整的provider和model信息
-        provider: cachedProvider,
-        model: cachedModel
+        providerId: selectedProviderId.value,
+        modelId: selectedModelId.value
       }
 
       if (configForm.value.id) {
@@ -648,7 +649,7 @@ export function useImageModelManager() {
 
     } catch (error) {
       console.error('Failed to save config:', error)
-      toast.error(`${t('image.config.saveFailed')}: ${error instanceof Error ? error.message : 'Unknown error'}`)
+      toast.error(formatErrorSummary(t('image.config.saveFailed'), error))
     } finally {
       isSaving.value = false
     }

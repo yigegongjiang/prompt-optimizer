@@ -38,7 +38,14 @@ export async function convertLegacyToTextModelConfigWithRegistry(
       providerId = 'zhipu';
       break;
     case 'openai':
+      providerId = 'openai';
+      break;
+    case 'grok':
+      providerId = 'grok';
+      break;
     case 'custom':
+      providerId = 'openai-compatible';
+      break;
     default:
       providerId = 'openai';
       break;
@@ -71,11 +78,14 @@ export async function convertLegacyToTextModelConfigWithRegistry(
       id: key,
       name: legacy.name,
       enabled: legacy.enabled,
+      providerId,
+      modelId: modelMeta.id,
       providerMeta: providerMeta,
       modelMeta: modelMeta,
       connectionConfig: {
         apiKey: legacy.apiKey,
-        baseURL: legacy.baseURL
+        baseURL: legacy.baseURL,
+        requestStyle: providerId === 'openai-compatible' ? 'chat_completions' : undefined
       },
       paramOverrides: builtIn,
       customParamOverrides: custom
@@ -94,6 +104,8 @@ export async function convertLegacyToTextModelConfigWithRegistry(
         id: key,
         name: legacy.name,
         enabled: false, // 转换失败，禁用配置
+        providerId: providerMeta.id,
+        modelId: modelMeta.id,
         providerMeta: providerMeta,
         modelMeta: modelMeta,
         connectionConfig: {
@@ -142,7 +154,14 @@ export function convertLegacyToTextModelConfig(
       providerId = 'zhipu';
       break;
     case 'openai':
+      providerId = 'openai';
+      break;
+    case 'grok':
+      providerId = 'grok';
+      break;
     case 'custom':
+      providerId = 'openai-compatible';
+      break;
     default:
       providerId = 'openai';
       break;
@@ -163,11 +182,14 @@ export function convertLegacyToTextModelConfig(
     id: key,
     name: legacy.name,
     enabled: legacy.enabled,
+    providerId,
+    modelId: modelMeta.id,
     providerMeta: providerMeta,
     modelMeta: modelMeta,
     connectionConfig: {
       apiKey: legacy.apiKey,
-      baseURL: legacy.baseURL
+      baseURL: legacy.baseURL,
+      requestStyle: providerId === 'openai-compatible' ? 'chat_completions' : undefined
     },
     paramOverrides: builtIn,
     customParamOverrides: custom
@@ -204,7 +226,7 @@ function createProviderMeta(providerId: string, legacy: ModelConfig): TextProvid
       name: 'DeepSeek',
       description: 'DeepSeek OpenAI-compatible models',
       requiresApiKey: true,
-      defaultBaseURL: legacy.baseURL || 'https://api.deepseek.com/v1',
+      defaultBaseURL: legacy.baseURL || 'https://api.deepseek.com',
       supportsDynamicModels: true,
       connectionSchema: {
         required: ['apiKey'],
@@ -270,22 +292,60 @@ function createProviderMeta(providerId: string, legacy: ModelConfig): TextProvid
         }
       }
     };
+  } else if (providerId === 'grok') {
+    return {
+      id: 'grok',
+      name: 'Grok',
+      description: 'xAI Grok models via OpenAI-compatible API',
+      requiresApiKey: true,
+      defaultBaseURL: legacy.baseURL || 'https://api.x.ai/v1',
+      supportsDynamicModels: true,
+      connectionSchema: {
+        required: ['apiKey'],
+        optional: ['baseURL', 'timeout'],
+        fieldTypes: {
+          apiKey: 'string',
+          baseURL: 'string',
+          timeout: 'number'
+        }
+      }
+    };
+  } else if (providerId === 'openai-compatible') {
+    return {
+      id: 'openai-compatible',
+      name: 'OpenAI Compatible (Custom)',
+      description: 'Custom endpoints that implement OpenAI Chat Completions or Responses APIs',
+      requiresApiKey: false,
+      defaultBaseURL: legacy.baseURL || 'http://localhost:11434/v1',
+      supportsDynamicModels: true,
+      connectionSchema: {
+        required: [],
+        optional: ['baseURL', 'apiKey', 'requestStyle', 'timeout'],
+        fieldTypes: {
+          apiKey: 'string',
+          baseURL: 'string',
+          requestStyle: 'string',
+          timeout: 'number'
+        }
+      }
+    };
   } else {
-    // OpenAI 及兼容 API - 始终使用 'OpenAI' 作为 Provider 名称
+    // Official OpenAI API
     return {
       id: 'openai',
       name: 'OpenAI',
-      description: 'OpenAI GPT models and OpenAI-compatible APIs',
+      description: 'Official OpenAI API for GPT and reasoning models',
       requiresApiKey: true,
       defaultBaseURL: legacy.baseURL || 'https://api.openai.com/v1',
       supportsDynamicModels: true,
       connectionSchema: {
         required: ['apiKey'],
-        optional: ['baseURL', 'organization', 'timeout'],
+        optional: ['baseURL', 'organization', 'requestStyle', 'timeout'],
         fieldTypes: {
           apiKey: 'string',
           baseURL: 'string',
           organization: 'string',
+          requestStyle: 'string',
           timeout: 'number'
         }
       }
@@ -314,6 +374,10 @@ function createModelMeta(modelId: string, providerId: string, legacy: ModelConfi
     defaultCapabilities.maxContextLength = 200000;
   } else if (modelId.includes('deepseek')) {
     defaultCapabilities.maxContextLength = 64000;
+  } else if (modelId.includes('grok')) {
+    defaultCapabilities.maxContextLength = 1000000;
+    defaultCapabilities.supportsTools = true;
+    defaultCapabilities.supportsReasoning = true;
   }
 
   if (providerId === 'siliconflow') {

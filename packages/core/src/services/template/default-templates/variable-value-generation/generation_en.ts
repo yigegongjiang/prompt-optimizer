@@ -4,7 +4,7 @@
  * Use LLM to intelligently infer variable values based on prompt context
  */
 
-import type { Template, MessageTemplate } from '../../../types';
+import type { Template, MessageTemplate } from '../../types';
 
 export const template: Template = {
   id: 'variable-value-generation',
@@ -61,7 +61,11 @@ Use strict JSON format, wrapped in a \`\`\`json code block:
 # Important Rules
 
 - Must generate a value for each variable in the list
+- If variable description or default value is provided, use it as primary context
+- If a variable has a default value and it fits the context, prefer it or stay close to it
 - If a variable has a current value, you may reference it but don't need to copy it
+- If "filled variable context" is provided, use it as scenario constraints when inferring missing variables
+- Only output values for "Variables Requiring Values"; do not output values for "Filled Variable Context"
 - Generated values should be concrete and directly usable strings
 - If a variable is difficult to infer, provide a generic placeholder and explain in reason
 - Output only JSON, no additional explanations`
@@ -73,6 +77,14 @@ Use strict JSON format, wrapped in a \`\`\`json code block:
 \`\`\`
 {{promptContent}}
 \`\`\`
+
+{{#hasContextVariables}}
+## Filled Variable Context (reference only, do not regenerate or output)
+
+{{contextVariablesText}}
+
+Total: {{contextVariableCount}} filled variables.
+{{/hasContextVariables}}
 
 ## Variables Requiring Values
 

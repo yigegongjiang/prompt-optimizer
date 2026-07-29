@@ -4,6 +4,7 @@
  */
 
 import { ref, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import type { 
   StandardPromptData,
@@ -21,7 +22,39 @@ import {
 import { useToast } from '../ui/useToast'
 
 export function useContextEditor() {
+  const { t } = useI18n()
   const toast = useToast()
+  const unknownErrorFallback = t('contextEditor.feedback.unknownError')
+  const formatErrorSummary = (summary: string, error: unknown, fallback = unknownErrorFallback) => {
+    const detail =
+      error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+          ? error
+          : fallback
+
+    if (!detail || detail === fallback || detail === summary || /^\[object .+\]$/.test(detail)) {
+      return summary
+    }
+
+    return `${summary}: ${detail}`
+  }
+
+  const localizeError = (summaryKey: string, detail?: unknown) =>
+    formatErrorSummary(t(summaryKey), detail, unknownErrorFallback)
+
+  const getImportFormatLabel = (format: string) => {
+    switch (format) {
+      case 'langfuse':
+        return t('contextEditor.feedback.formatLabels.langfuse')
+      case 'openai':
+        return t('contextEditor.feedback.formatLabels.openai')
+      case 'conversation':
+        return t('contextEditor.feedback.formatLabels.conversation')
+      default:
+        return format.toUpperCase()
+    }
+  }
 
   const isOpenAIRequest = (value: unknown): value is OpenAIRequest => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -74,17 +107,17 @@ export function useContextEditor() {
       const result = converter.fromLangFuse(langfuseData)
       if (result.success && result.data) {
         currentData.value = result.data
-        toast.success('LangFuse数据转换成功')
+        toast.success(t('contextEditor.feedback.langfuseConverted'))
       } else {
-        error.value = result.error || '转换失败'
+        error.value = localizeError('contextEditor.feedback.conversionFailed', result.error)
         toast.error(error.value)
       }
       
       return result
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : '未知错误'
+      const errorMsg = localizeError('contextEditor.feedback.conversionFailed', err)
       error.value = errorMsg
-      toast.error(`转换失败: ${errorMsg}`)
+      toast.error(errorMsg)
       return { success: false, error: errorMsg }
     } finally {
       isLoading.value = false
@@ -97,23 +130,26 @@ export function useContextEditor() {
       error.value = null
       
       if (!isOpenAIRequest(openaiData)) {
-        return { success: false, error: 'Invalid OpenAI request: missing model/messages' }
+        const errorMsg = t('contextEditor.feedback.invalidOpenAIRequest')
+        error.value = errorMsg
+        toast.error(errorMsg)
+        return { success: false, error: errorMsg }
       }
 
       const result = converter.fromOpenAI(openaiData)
       if (result.success && result.data) {
         currentData.value = result.data
-        toast.success('OpenAI数据转换成功')
+        toast.success(t('contextEditor.feedback.openaiConverted'))
       } else {
-        error.value = result.error || '转换失败'
+        error.value = localizeError('contextEditor.feedback.conversionFailed', result.error)
         toast.error(error.value)
       }
       
       return result
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : '未知错误'
+      const errorMsg = localizeError('contextEditor.feedback.conversionFailed', err)
       error.value = errorMsg
-      toast.error(`转换失败: ${errorMsg}`)
+      toast.error(errorMsg)
       return { success: false, error: errorMsg }
     } finally {
       isLoading.value = false
@@ -135,7 +171,7 @@ export function useContextEditor() {
           break
         case 'openai':
           if (!isOpenAIRequest(data)) {
-            result = { success: false, error: 'Invalid OpenAI request: missing model/messages' }
+            result = { success: false, error: t('contextEditor.feedback.invalidOpenAIRequest') }
           } else {
             result = converter.fromOpenAI(data)
           }
@@ -144,22 +180,25 @@ export function useContextEditor() {
           result = converter.fromConversationMessages(data as Array<Partial<ConversationMessage>>)
           break
         default:
-          result = { success: false, error: `不支持的数据格式: ${format}` }
+          result = {
+            success: false,
+            error: t('contextEditor.feedback.unsupportedDataFormat', { format })
+          }
       }
 
       if (result.success && result.data) {
         currentData.value = result.data
-        toast.success(`${format.toUpperCase()}格式数据导入成功`)
+        toast.success(t('contextEditor.feedback.importSuccess', { format: getImportFormatLabel(format) }))
       } else {
-        error.value = result.error || '导入失败'
+        error.value = localizeError('contextEditor.feedback.importFailed', result.error)
         toast.error(error.value)
       }
       
       return result
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : '未知错误'
+      const errorMsg = localizeError('contextEditor.feedback.importFailed', err)
       error.value = errorMsg
-      toast.error(`导入失败: ${errorMsg}`)
+      toast.error(errorMsg)
       return { success: false, error: errorMsg }
     } finally {
       isLoading.value = false
@@ -175,7 +214,7 @@ export function useContextEditor() {
     endIndex: number
   ) => {
     if (!currentData.value) {
-      toast.error('没有可编辑的数据')
+      toast.error(t('contextEditor.feedback.noEditableData'))
       return false
     }
 
@@ -202,10 +241,10 @@ export function useContextEditor() {
       }
       (metadataRecord.variables as Record<string, string>)[variableName] = result.extractedVariable.value
 
-      toast.success(`变量 ${variableName} 提取成功`)
+      toast.success(t('contextEditor.feedback.variableExtracted', { name: variableName }))
       return true
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : '变量提取失败'
+      const errorMsg = localizeError('contextEditor.feedback.variableExtractionFailed', err)
       toast.error(errorMsg)
       return false
     }
@@ -226,7 +265,7 @@ export function useContextEditor() {
         description: suggestion.reason
       }))
     } catch (err) {
-      console.error('变量建议生成失败:', err)
+      console.error('Failed to generate variable suggestions:', err)
       return []
     }
   }
@@ -234,16 +273,16 @@ export function useContextEditor() {
   // 模板化处理
   const convertToTemplate = () => {
     if (!currentData.value) {
-      toast.error('没有可处理的数据')
+      toast.error(t('contextEditor.feedback.noDataToProcess'))
       return null
     }
 
     try {
       const result = templateProcessor.toTemplate(currentData.value)
-      toast.success('模板转换成功')
+      toast.success(t('contextEditor.feedback.templateConverted'))
       return result
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : '模板转换失败'
+      const errorMsg = localizeError('contextEditor.feedback.templateConversionFailed', err)
       toast.error(errorMsg)
       return null
     }
@@ -256,10 +295,10 @@ export function useContextEditor() {
     try {
       const result = templateProcessor.fromTemplate(template, variables)
       currentData.value = result
-      toast.success('变量应用成功')
+      toast.success(t('contextEditor.feedback.variablesApplied'))
       return result
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : '变量应用失败'
+      const errorMsg = localizeError('contextEditor.feedback.variableApplicationFailed', err)
       toast.error(errorMsg)
       return null
     }
@@ -272,7 +311,7 @@ export function useContextEditor() {
     try {
       return templateProcessor.validateVariables(template, variables)
     } catch (err) {
-      console.error('变量验证失败:', err)
+      console.error('Failed to validate variables:', err)
       return {
         isValid: false,
         missingVariables: [],
@@ -289,15 +328,15 @@ export function useContextEditor() {
       
       if (result.success && result.data) {
         currentData.value = result.data
-        toast.success('文件导入成功')
+        toast.success(t('contextEditor.feedback.fileImported'))
         return true
       } else {
-        error.value = result.error || '导入失败'
+        error.value = localizeError('contextEditor.feedback.fileImportFailed', result.error)
         toast.error(error.value)
         return false
       }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : '文件导入失败'
+      const errorMsg = localizeError('contextEditor.feedback.fileImportFailed', err)
       error.value = errorMsg
       toast.error(errorMsg)
       return false
@@ -312,15 +351,15 @@ export function useContextEditor() {
       
       if (result.success && result.data) {
         currentData.value = result.data
-        toast.success('剪贴板数据导入成功')
+        toast.success(t('contextEditor.feedback.clipboardImported'))
         return true
       } else {
-        error.value = result.error || '导入失败'
+        error.value = localizeError('contextEditor.feedback.clipboardImportFailed', result.error)
         toast.error(error.value)
         return false
       }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : '剪贴板导入失败'
+      const errorMsg = localizeError('contextEditor.feedback.clipboardImportFailed', err)
       error.value = errorMsg
       toast.error(errorMsg)
       return false
@@ -329,16 +368,16 @@ export function useContextEditor() {
 
   const exportToFile = (format: 'standard' | 'openai' | 'template', filename?: string) => {
     if (!currentData.value) {
-      toast.error('没有可导出的数据')
+      toast.error(t('contextEditor.feedback.noDataToExport'))
       return false
     }
 
     try {
       importExportManager.exportToFile(currentData.value, format, filename)
-      toast.success('数据已导出到文件')
+      toast.success(t('contextEditor.feedback.exportToFileSuccess'))
       return true
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : '导出失败'
+      const errorMsg = localizeError('contextEditor.feedback.exportFailed', err)
       toast.error(errorMsg)
       return false
     }
@@ -346,20 +385,20 @@ export function useContextEditor() {
 
   const exportToClipboard = async (format: 'standard' | 'openai' | 'template') => {
     if (!currentData.value) {
-      toast.error('没有可导出的数据')
+      toast.error(t('contextEditor.feedback.noDataToExport'))
       return false
     }
 
     try {
       const success = await importExportManager.exportToClipboard(currentData.value, format)
       if (success) {
-        toast.success('数据已复制到剪贴板')
+        toast.success(t('contextEditor.feedback.exportToClipboardSuccess'))
       } else {
-        toast.error('复制失败')
+        toast.error(t('contextEditor.feedback.copyFailed'))
       }
       return success
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : '导出失败'
+      const errorMsg = localizeError('contextEditor.feedback.exportFailed', err)
       toast.error(errorMsg)
       return false
     }
@@ -372,7 +411,7 @@ export function useContextEditor() {
     try {
       return templateProcessor.suggestOptimizations(currentData.value)
     } catch (err) {
-      console.error('优化建议生成失败:', err)
+      console.error('Failed to generate optimization suggestions:', err)
       return []
     }
   }

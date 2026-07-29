@@ -11,19 +11,20 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { getPiniaServices } from '../../plugins/pinia'
-import { TEMPLATE_SELECTION_KEYS, type ConversationMessage } from '@prompt-optimizer/core'
+import { TEMPLATE_SELECTION_KEYS, type ConversationMessage, type PromptAssetBinding, type PromptSessionOrigin } from '@prompt-optimizer/core'
+import { coerceTestPanelVersionValue } from '../../utils/testPanelVersion'
 import { isValidVariableName, sanitizeVariableRecord } from '../../types/variable'
+import { createSessionAssetBindingState } from './sessionAssetBinding'
 import {
+  createDefaultCompareSnapshotRoles,
+  createDefaultCompareSnapshotRoleSignatures,
   createDefaultEvaluationResults,
+  sanitizeCompareSnapshotRoles,
+  sanitizeCompareSnapshotRoleSignatures,
+  type PersistedCompareSnapshotRoles,
+  type PersistedCompareSnapshotRoleSignatures,
   type PersistedEvaluationResults,
 } from '../../types/evaluation'
-
-export interface TestResults {
-  originalResult: string
-  originalReasoning: string
-  optimizedResult: string
-  optimizedReasoning: string
-}
 
 /**
  * Pro-MultiMessage 会话状态
@@ -44,27 +45,31 @@ export interface ProMultiMessageSessionState {
   temporaryVariables: Record<string, string>
 
   messageChainMap: Record<string, string>
-  testResults: TestResults | null
   layout: ProMultiLayoutConfig
   testVariants: TestVariantConfig[]
   testVariantResults: TestVariantResults
   testVariantLastRunFingerprint: TestVariantLastRunFingerprint
   evaluationResults: PersistedEvaluationResults
+  compareSnapshotRoles: PersistedCompareSnapshotRoles<TestVariantId>
+  compareSnapshotRoleSignatures: PersistedCompareSnapshotRoleSignatures<TestVariantId>
   selectedOptimizeModelKey: string
   selectedTestModelKey: string
   selectedTemplateId: string | null
   selectedIterateTemplateId: string | null
   isCompareMode: boolean
   lastActiveAt: number
+  assetBinding?: PromptAssetBinding
+  origin?: PromptSessionOrigin
 }
 
 /**
  * pro-multi 测试面板的版本选择（针对“当前选中消息”）：
  * - 0: v0（原始消息内容）
  * - >=1: v1..vn（历史链版本号）
- * - 'latest': 跟随最新 vn
+ * - 'workspace': 下方工作区当前内容（未保存草稿也算）
+ * - 'previous': 动态指向最近保存版本的上一版
  */
-export type TestPanelVersionValue = 0 | number | 'latest'
+export type TestPanelVersionValue = 'workspace' | 'previous' | 0 | number
 
 export type TestVariantId = 'a' | 'b' | 'c' | 'd'
 
@@ -104,14 +109,13 @@ const createDefaultState = (): ProMultiMessageSessionState => ({
   versionId: '',
   temporaryVariables: {},
   messageChainMap: {},
-  testResults: null,
   // v2: 多列测试（最多 4 列）
   layout: { mainSplitLeftPct: 50, testColumnCount: 2 },
   testVariants: [
     { id: 'a', version: 0, modelKey: '' },
-    { id: 'b', version: 'latest', modelKey: '' },
-    { id: 'c', version: 'latest', modelKey: '' },
-    { id: 'd', version: 'latest', modelKey: '' },
+    { id: 'b', version: 'workspace', modelKey: '' },
+    { id: 'c', version: 'workspace', modelKey: '' },
+    { id: 'd', version: 'workspace', modelKey: '' },
   ],
   testVariantResults: {
     a: { result: '', reasoning: '' },
@@ -126,12 +130,16 @@ const createDefaultState = (): ProMultiMessageSessionState => ({
     d: '',
   },
   evaluationResults: createDefaultEvaluationResults(),
+  compareSnapshotRoles: createDefaultCompareSnapshotRoles<TestVariantId>(),
+  compareSnapshotRoleSignatures: createDefaultCompareSnapshotRoleSignatures<TestVariantId>(),
   selectedOptimizeModelKey: '',
   selectedTestModelKey: '',
   selectedTemplateId: null,
   selectedIterateTemplateId: null,
   isCompareMode: true,
   lastActiveAt: Date.now(),
+  assetBinding: undefined,
+  origin: undefined,
 })
 
 export const useProMultiMessageSession = defineStore('proMultiMessageSession', () => {
@@ -159,16 +167,13 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
   // 临时变量（子模式隔离 + 持久化）
   const temporaryVariables = ref<Record<string, string>>({})
 
-  // 测试结果
-  const testResults = ref<TestResults | null>(null)
-
   // 多列测试（最多 4 列）
   const layout = ref<ProMultiLayoutConfig>({ mainSplitLeftPct: 50, testColumnCount: 2 })
   const testVariants = ref<TestVariantConfig[]>([
     { id: 'a', version: 0, modelKey: '' },
-    { id: 'b', version: 'latest', modelKey: '' },
-    { id: 'c', version: 'latest', modelKey: '' },
-    { id: 'd', version: 'latest', modelKey: '' },
+    { id: 'b', version: 'workspace', modelKey: '' },
+    { id: 'c', version: 'workspace', modelKey: '' },
+    { id: 'd', version: 'workspace', modelKey: '' },
   ])
   const testVariantResults = ref<TestVariantResults>({
     a: { result: '', reasoning: '' },
@@ -185,6 +190,12 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
 
   // 评估结果
   const evaluationResults = ref<PersistedEvaluationResults>(createDefaultEvaluationResults())
+  const compareSnapshotRoles = ref<PersistedCompareSnapshotRoles<TestVariantId>>(
+    createDefaultCompareSnapshotRoles<TestVariantId>()
+  )
+  const compareSnapshotRoleSignatures = ref<PersistedCompareSnapshotRoleSignatures<TestVariantId>>(
+    createDefaultCompareSnapshotRoleSignatures<TestVariantId>()
+  )
 
   // 模型和模板选择（只存 ID/key）
   const selectedOptimizeModelKey = ref('')
@@ -197,6 +208,14 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
 
   // 最后活跃时间
   const lastActiveAt = ref(Date.now())
+  const assetBindingState = createSessionAssetBindingState(
+    () => {
+      lastActiveAt.value = Date.now()
+    },
+    () => {
+      void saveSession()
+    },
+  )
 
   /**
    * 更新对话消息快照
@@ -228,6 +247,10 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
     const nextReasoning = payload.reasoning
     const nextChainId = payload.chainId
     const nextVersionId = payload.versionId
+
+    if (!nextChainId && !nextVersionId) {
+      assetBindingState.clearAssetBindingWithoutPersist()
+    }
 
     const changed =
       optimizedPrompt.value !== nextOptimizedPrompt ||
@@ -276,6 +299,7 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
     }
     temporaryVariables.value[name] = value
     lastActiveAt.value = Date.now()
+    void saveSession()
   }
 
   const getTemporaryVariable = (name: string): string | undefined => {
@@ -288,34 +312,13 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
     if (!Object.prototype.hasOwnProperty.call(temporaryVariables.value, name)) return
     delete temporaryVariables.value[name]
     lastActiveAt.value = Date.now()
+    void saveSession()
   }
 
   const clearTemporaryVariables = () => {
     temporaryVariables.value = {}
     lastActiveAt.value = Date.now()
-  }
-
-  /**
-   * 更新测试结果
-   */
-  const updateTestResults = (results: TestResults | null) => {
-    const prev = testResults.value
-
-    // 检查是否相同
-    const isSame =
-      prev === results ||
-      (!!prev &&
-        !!results &&
-        prev.originalResult === results.originalResult &&
-        prev.originalReasoning === results.originalReasoning &&
-        prev.optimizedResult === results.optimizedResult &&
-        prev.optimizedReasoning === results.optimizedReasoning)
-
-    if (isSame) return
-
-    // 直接赋值给 ref（现在是响应式的）
-    testResults.value = results
-    lastActiveAt.value = Date.now()
+    void saveSession()
   }
 
   /**
@@ -369,6 +372,16 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
     lastActiveAt.value = Date.now()
   }
 
+  const updateCompareSnapshotRoles = (
+    roles: PersistedCompareSnapshotRoles<TestVariantId>,
+    signatures: PersistedCompareSnapshotRoleSignatures<TestVariantId>,
+  ) => {
+    compareSnapshotRoles.value = { ...roles }
+    compareSnapshotRoleSignatures.value = { ...signatures }
+    lastActiveAt.value = Date.now()
+    saveSession()
+  }
+
   const setTestColumnCount = (count: TestColumnCount) => {
     if (layout.value.testColumnCount === count) return
     layout.value = { ...layout.value, testColumnCount: count }
@@ -397,6 +410,37 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
     saveSession()
   }
 
+  const resetTestVariantState = () => {
+    const defaultState = createDefaultState()
+    testVariantResults.value = defaultState.testVariantResults
+    testVariantLastRunFingerprint.value = defaultState.testVariantLastRunFingerprint
+    lastActiveAt.value = Date.now()
+  }
+
+  const clearContent = (options: { persist?: boolean } = {}) => {
+    const defaultState = createDefaultState()
+    conversationMessagesSnapshot.value = defaultState.conversationMessagesSnapshot
+    selectedMessageId.value = defaultState.selectedMessageId
+    optimizedPrompt.value = defaultState.optimizedPrompt
+    reasoning.value = defaultState.reasoning
+    chainId.value = defaultState.chainId
+    versionId.value = defaultState.versionId
+    temporaryVariables.value = defaultState.temporaryVariables
+    messageChainMap.value = defaultState.messageChainMap
+    testVariantResults.value = defaultState.testVariantResults
+    testVariantLastRunFingerprint.value = defaultState.testVariantLastRunFingerprint
+    evaluationResults.value = defaultState.evaluationResults
+    compareSnapshotRoles.value = defaultState.compareSnapshotRoles
+    compareSnapshotRoleSignatures.value = defaultState.compareSnapshotRoleSignatures
+    assetBindingState.clearAssetBindingWithoutPersist()
+    lastActiveAt.value = Date.now()
+    if (options.persist !== false) {
+      void saveSession().catch((error) => {
+        console.error('[ProMultiMessageSession] Failed to persist cleared content:', error)
+      })
+    }
+  }
+
   /**
    * 重置状态
    */
@@ -410,17 +454,19 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
     versionId.value = defaultState.versionId
     temporaryVariables.value = defaultState.temporaryVariables
     messageChainMap.value = defaultState.messageChainMap
-    testResults.value = defaultState.testResults
     layout.value = defaultState.layout
     testVariants.value = defaultState.testVariants
     testVariantResults.value = defaultState.testVariantResults
     testVariantLastRunFingerprint.value = defaultState.testVariantLastRunFingerprint
     evaluationResults.value = defaultState.evaluationResults
+    compareSnapshotRoles.value = defaultState.compareSnapshotRoles
+    compareSnapshotRoleSignatures.value = defaultState.compareSnapshotRoleSignatures
     selectedOptimizeModelKey.value = defaultState.selectedOptimizeModelKey
     selectedTestModelKey.value = defaultState.selectedTestModelKey
     selectedTemplateId.value = defaultState.selectedTemplateId
     selectedIterateTemplateId.value = defaultState.selectedIterateTemplateId
     isCompareMode.value = defaultState.isCompareMode
+    assetBindingState.resetAssetBinding()
     lastActiveAt.value = defaultState.lastActiveAt
   }
 
@@ -430,7 +476,7 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
   const saveSession = async () => {
     const $services = getPiniaServices()
     if (!$services?.preferenceService) {
-      console.warn('[ProMultiMessageSession] PreferenceService 不可用，无法保存会话')
+      console.warn('[ProMultiMessageSession] PreferenceService is unavailable; cannot save session')
       return
     }
 
@@ -445,25 +491,27 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
         versionId: versionId.value,
         temporaryVariables: sanitizeVariableRecord(temporaryVariables.value),
         messageChainMap: messageChainMap.value,
-        testResults: testResults.value,
         layout: layout.value,
         testVariants: testVariants.value,
         testVariantResults: testVariantResults.value,
         testVariantLastRunFingerprint: testVariantLastRunFingerprint.value,
         evaluationResults: evaluationResults.value,
+        compareSnapshotRoles: compareSnapshotRoles.value,
+        compareSnapshotRoleSignatures: compareSnapshotRoleSignatures.value,
         selectedOptimizeModelKey: selectedOptimizeModelKey.value,
         selectedTestModelKey: selectedTestModelKey.value,
         selectedTemplateId: selectedTemplateId.value,
         selectedIterateTemplateId: selectedIterateTemplateId.value,
         isCompareMode: isCompareMode.value,
         lastActiveAt: lastActiveAt.value,
+        ...assetBindingState.persistedAssetBinding(),
       }
       await $services.preferenceService.set(
         'session/v1/pro-multi',
         sessionState
       )
     } catch (error) {
-      console.error('[ProMultiMessageSession] 保存会话失败:', error)
+      console.error('[ProMultiMessageSession] Failed to save session:', error)
     }
   }
 
@@ -473,7 +521,7 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
   const restoreSession = async () => {
     const $services = getPiniaServices()
     if (!$services?.preferenceService) {
-      console.warn('[ProMultiMessageSession] PreferenceService 不可用，无法恢复会话')
+      console.warn('[ProMultiMessageSession] PreferenceService is unavailable; cannot restore session')
       return
     }
 
@@ -501,9 +549,6 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
         messageChainMap.value = (parsed.messageChainMap && typeof parsed.messageChainMap === 'object')
           ? (parsed.messageChainMap as Record<string, string>)
           : {}
-        testResults.value = (parsed.testResults && typeof parsed.testResults === 'object')
-          ? (parsed.testResults as TestResults)
-          : null
 
         // ==================== v2: 多列 variants ====================
         // 默认状态
@@ -533,10 +578,7 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
           const byId = new Map<TestVariantId, TestVariantConfig>()
 
           const normalizeVersion = (v: unknown): TestPanelVersionValue => {
-            if (v === 0) return 0
-            if (v === 'latest') return 'latest'
-            if (typeof v === 'number' && Number.isFinite(v) && v >= 1) return v
-            return 'latest'
+            return coerceTestPanelVersionValue(v) ?? 'workspace'
           }
 
           for (const item of rawVariants) {
@@ -557,7 +599,7 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
           testVariants.value = defaultState.testVariants
         }
 
-        // testVariantResults / migration from legacy testResults
+        // testVariantResults
         const rawVariantResults = parsed.testVariantResults
         if (rawVariantResults && typeof rawVariantResults === 'object') {
           const resultRecord = rawVariantResults as Record<string, unknown>
@@ -575,19 +617,6 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
             b: pick('b'),
             c: pick('c'),
             d: pick('d'),
-          }
-        } else if (testResults.value) {
-          // legacy 迁移：旧版 testResults（original/optimized） → A/B
-          testVariantResults.value = {
-            ...defaultState.testVariantResults,
-            a: {
-              result: testResults.value.originalResult || '',
-              reasoning: testResults.value.originalReasoning || '',
-            },
-            b: {
-              result: testResults.value.optimizedResult || '',
-              reasoning: testResults.value.optimizedReasoning || '',
-            },
           }
         } else {
           testVariantResults.value = defaultState.testVariantResults
@@ -614,11 +643,20 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
             ? (parsed.evaluationResults as PersistedEvaluationResults)
             : {}),
         }
+        compareSnapshotRoles.value = sanitizeCompareSnapshotRoles(
+          (parsed as Partial<ProMultiMessageSessionState>).compareSnapshotRoles,
+          ['a', 'b', 'c', 'd']
+        )
+        compareSnapshotRoleSignatures.value = sanitizeCompareSnapshotRoleSignatures(
+          (parsed as Partial<ProMultiMessageSessionState>).compareSnapshotRoleSignatures,
+          ['a', 'b', 'c', 'd']
+        )
         selectedOptimizeModelKey.value = typeof parsed.selectedOptimizeModelKey === 'string' ? parsed.selectedOptimizeModelKey : ''
         selectedTestModelKey.value = typeof parsed.selectedTestModelKey === 'string' ? parsed.selectedTestModelKey : ''
         selectedTemplateId.value = typeof parsed.selectedTemplateId === 'string' ? parsed.selectedTemplateId : null
         selectedIterateTemplateId.value = typeof parsed.selectedIterateTemplateId === 'string' ? parsed.selectedIterateTemplateId : null
         isCompareMode.value = typeof parsed.isCompareMode === 'boolean' ? parsed.isCompareMode : true
+        assetBindingState.restoreAssetBinding(parsed)
         lastActiveAt.value = Date.now()
 
         // 如果 variants 的 modelKey 为空，尝试用 legacy selectedTestModelKey 填充一次
@@ -657,7 +695,7 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
         }
       }
     } catch (error) {
-      console.error('[ProMultiMessageSession] 恢复会话失败:', error)
+      console.error('[ProMultiMessageSession] Failed to restore session:', error)
       reset()
     }
   }
@@ -672,18 +710,21 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
     versionId,
     temporaryVariables,
     messageChainMap,
-    testResults,
     layout,
     testVariants,
     testVariantResults,
     testVariantLastRunFingerprint,
     evaluationResults,
+    compareSnapshotRoles,
+    compareSnapshotRoleSignatures,
     selectedOptimizeModelKey,
     selectedTestModelKey,
     selectedTemplateId,
     selectedIterateTemplateId,
     isCompareMode,
     lastActiveAt,
+    assetBinding: assetBindingState.assetBinding,
+    origin: assetBindingState.origin,
 
     // ========== 更新方法 ==========
     updateConversationMessages,
@@ -697,14 +738,18 @@ export const useProMultiMessageSession = defineStore('proMultiMessageSession', (
     getTemporaryVariable,
     deleteTemporaryVariable,
     clearTemporaryVariables,
-    updateTestResults,
     updateOptimizeModel,
     updateTestModel,
     updateTemplate,
     updateIterateTemplate,
     toggleCompareMode,
+    updateCompareSnapshotRoles,
     setTestColumnCount,
     setMainSplitLeftPct,
+    resetTestVariantState,
+    clearContent,
+    updateAssetBinding: assetBindingState.updateAssetBinding,
+    clearAssetBinding: assetBindingState.clearAssetBinding,
     updateTestVariant,
     reset,
 

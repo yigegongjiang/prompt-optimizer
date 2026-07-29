@@ -4,7 +4,7 @@
  * 使用 LLM 智能识别提示词中的可参数化变量
  */
 
-import type { Template, MessageTemplate } from '../../../types';
+import type { Template, MessageTemplate } from '../../types';
 
 export const template: Template = {
   id: 'variable-extraction',
@@ -57,10 +57,12 @@ export const template: Template = {
 
 # 重要规则
 
-- 最多返回20个变量,按重要性排序
+- 最多返回5个变量,按重要性排序
+- 优先保留主体、数量、颜色、关键动作、关键场景或核心风格锚点
+- 避免提取低价值修饰词、重复限定词和局部装饰
 - position.originalText 必须能在原文中精确找到
 - position.occurrence 表示第几次出现(从1开始)
-- 如果原文中已有 {{变量}},不要重复提取
+- 如果原文中已有 {{=<% %>=}}{{变量}}<%={{ }}=%>,不要重复提取
 - 如果没有合适的变量,返回 {"variables": [], "summary": "无可提取变量"}
 
 只输出 JSON,不添加额外解释。`

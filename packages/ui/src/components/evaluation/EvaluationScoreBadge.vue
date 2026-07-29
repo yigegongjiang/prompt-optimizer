@@ -20,6 +20,10 @@
         :loading="loading"
         :disabled="loading"
         class="evaluation-score-badge-btn"
+        :class="{
+          'evaluation-score-badge-btn--stale': stale,
+          'evaluation-score-badge-btn--interactive': !!result && !loading,
+        }"
         :data-testid="`score-badge-${type}`"
         :data-eval-type="type"
         @click="handleClick"
@@ -41,6 +45,10 @@
         :result="result"
         :type="type"
         :loading="loading"
+        :stale="stale"
+        :stale-message="staleMessage"
+        :disable-evaluate="disableEvaluate"
+        :disable-evaluate-reason="disableEvaluateReason"
         :visible="popoverVisible"
         @show-detail="handleShowDetail"
         @evaluate="handleEvaluate"
@@ -77,6 +85,14 @@ const props = withDefaults(
     result?: EvaluationResponse | null
     /** 评估类型 */
     type?: EvaluationType
+    /** 当前结果是否已过期 */
+    stale?: boolean
+    /** 过期提示文案 */
+    staleMessage?: string
+    /** 是否禁止重新评估，但仍允许查看已有结果 */
+    disableEvaluate?: boolean
+    /** 不可重新评估时的原因说明 */
+    disableEvaluateReason?: string
   }>(),
   {
     score: null,
@@ -84,7 +100,11 @@ const props = withDefaults(
     loading: false,
     size: 'small',
     result: null,
-    type: 'original',
+    type: 'result',
+    stale: false,
+    staleMessage: '',
+    disableEvaluate: false,
+    disableEvaluateReason: '',
   }
 )
 
@@ -174,6 +194,10 @@ const displayText = computed(() => {
 const buttonSize = computed(() => (props.size === 'small' ? 'tiny' : 'small'))
 
 const badgeType = computed(() => {
+  if (props.stale) {
+    return 'default'
+  }
+
   switch (computedLevel.value) {
     case 'excellent':
     case 'good':
@@ -192,6 +216,11 @@ const badgeType = computed(() => {
 // 点击处理 - 显示/隐藏悬浮预览
 const handleClick = () => {
   if (props.loading) return
+
+  if (props.result) {
+    handleShowDetail()
+    return
+  }
 
   if (popoverVisible.value && isPinnedByClick.value) {
     closePopover()
@@ -272,12 +301,14 @@ const handleShowDetail = () => {
 
 // 评估处理 - 关闭悬浮预览并触发评估
 const handleEvaluate = () => {
+  if (props.disableEvaluate) return
   closePopover()
   emit('evaluate')
 }
 
 // 带反馈评估处理
 const handleEvaluateWithFeedback = (payload: { feedback: string }) => {
+  if (props.disableEvaluate) return
   closePopover()
   emit('evaluate-with-feedback', {
     type: props.type,
@@ -303,6 +334,34 @@ const handleApplyPatch = (payload: { operation: PatchOperation }) => {
   min-width: 40px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease,
+    filter 0.16s ease;
+}
+
+.evaluation-score-badge-btn--stale {
+  opacity: 0.72;
+  filter: saturate(0.2);
+}
+
+.evaluation-score-badge-btn--interactive:not(:disabled) {
+  cursor: pointer;
+}
+
+.evaluation-score-badge-btn--interactive:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.12);
+}
+
+.evaluation-score-badge-btn--interactive:not(:disabled):active {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.1);
+}
+
+.evaluation-score-badge-btn--interactive:not(:disabled):focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }
 
 .hover-card-wrapper {

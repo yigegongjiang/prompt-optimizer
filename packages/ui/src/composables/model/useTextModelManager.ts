@@ -4,17 +4,28 @@ import { useI18n } from 'vue-i18n'
 import { useToast } from '../ui/useToast'
 import {
   type ModelOption,
+  type CustomRequestHeaderInput,
+  CHROME_BUILT_IN_PROVIDER_ID,
+  type ChromeBuiltInDownloadProgress,
+  type ChromeBuiltInStatus,
   type TextModel,
   type TextModelConfig,
   type TextProvider,
-  getBuiltinModelIds
+  checkChromeBuiltInAvailability,
+  getBuiltinModelIds,
+  markChromeBuiltInUserConfigured,
+  normalizeCustomRequestHeaders,
+  prepareChromeBuiltInModel,
+  resolveTextModelMetadata,
+  validateCustomRequestHeaders
 } from '@prompt-optimizer/core'
-import { getI18nErrorMessage } from '../../utils/error'
+import { formatErrorSummary, getI18nErrorMessage } from '../../utils/error'
 import { useModelAdvancedParameters } from './useModelAdvancedParameters'
 import { computeConnectionConfig } from './useConnectionConfig'
 import type { AppServices } from '../../types/services'
 
-type TextConnectionValue = string | number | boolean | undefined
+type CustomHeaderRow = { key?: unknown; name?: unknown; value?: unknown }
+type TextConnectionValue = string | number | boolean | Record<string, string> | CustomHeaderRow[] | undefined
 interface TextConnectionConfig {
   [key: string]: TextConnectionValue
 }
@@ -50,6 +61,22 @@ const generateTextModelId = (providerId: string, nonce?: number) => {
 export function useTextModelManager() {
   const { t } = useI18n()
   const toast = useToast()
+
+  const getErrorDetail = (error: unknown, fallback = t('common.error')) => {
+    return getI18nErrorMessage(error, fallback)
+  }
+
+  const withLocalizedError = (
+    key: string,
+    error: unknown,
+    params: Record<string, unknown> = {},
+    fallback = t('common.error')
+  ) => {
+    return t(key, {
+      ...params,
+      error: getErrorDetail(error, fallback),
+    })
+  }
 
   const services = inject<Ref<AppServices | null>>('services', ref(null))
   if (!services.value) {
@@ -91,10 +118,15 @@ export function useTextModelManager() {
     type: 'success' | 'error' | 'warning' | 'info'
     message: string
   } | null>(null)
+  const chromeBuiltInStatus = ref<ChromeBuiltInStatus | null>(null)
+  const isCheckingChromeBuiltIn = ref(false)
+  const isPreparingChromeBuiltIn = ref(false)
+  const chromeBuiltInDownloadProgress = ref<ChromeBuiltInDownloadProgress | null>(null)
 
   const modelOptions = ref<ModelOption[]>([])
   const isLoadingModelOptions = ref(false)
   const currentProviderType = computed(() => form.value.providerId || 'custom')
+  const isChromeBuiltInProvider = computed(() => currentProviderType.value === CHROME_BUILT_IN_PROVIDER_ID)
 
   const providerOptions = computed(() =>
     providers.value.map(provider => ({
@@ -131,25 +163,41 @@ export function useTextModelManager() {
   const connectionFields = computed(() => {
     if (!selectedProvider.value?.connectionSchema) return []
 
-    const schema = selectedProvider.value.connectionSchema
-    const fields: Array<{ name: string; required: boolean; type: string; placeholder?: string }> = []
+    const provider = selectedProvider.value
+    const schema = provider.connectionSchema!
+    const fields: Array<{
+      name: string
+      required: boolean
+      type: string
+      placeholder?: string
+      options?: Array<{ label: string; value: string }>
+    }> = []
+
+    const buildField = (fieldName: string, required: boolean) => ({
+      name: fieldName,
+      required,
+      type: schema.fieldTypes[fieldName] || 'string',
+      placeholder: fieldName === 'baseURL' ? provider.defaultBaseURL : '',
+      options: fieldName === 'requestStyle'
+        ? [
+            {
+              label: t('modelManager.connection.requestStyleOptions.chatCompletions'),
+              value: 'chat_completions'
+            },
+            {
+              label: t('modelManager.connection.requestStyleOptions.responses'),
+              value: 'responses'
+            }
+          ]
+        : undefined
+    })
 
     for (const fieldName of schema.required) {
-      fields.push({
-        name: fieldName,
-        required: true,
-        type: schema.fieldTypes[fieldName] || 'string',
-        placeholder: fieldName === 'baseURL' ? selectedProvider.value.defaultBaseURL : ''
-      })
+      fields.push(buildField(fieldName, true))
     }
 
     for (const fieldName of schema.optional) {
-      fields.push({
-        name: fieldName,
-        required: false,
-        type: schema.fieldTypes[fieldName] || 'string',
-        placeholder: fieldName === 'baseURL' ? selectedProvider.value.defaultBaseURL : ''
-      })
+      fields.push(buildField(fieldName, false))
     }
 
     return fields
@@ -158,7 +206,7 @@ export function useTextModelManager() {
   const isConnectionConfigured = computed(() => {
     if (!selectedProvider.value?.connectionSchema) return true
 
-    const schema = selectedProvider.value.connectionSchema
+    const schema = selectedProvider.value.connectionSchema!
     const config = form.value.connectionConfig || {}
 
     return schema.required.every(field => !!config[field])
@@ -173,7 +221,15 @@ export function useTextModelManager() {
     if (!form.value.modelId?.trim()) return false
     // 必须有 provider
     if (!form.value.providerId) return false
+    if (isChromeBuiltInProvider.value && chromeBuiltInStatus.value?.availability !== 'available') return false
 
+    return true
+  })
+  const canSaveForm = computed(() => {
+    if (isSaving.value) return false
+    if (!form.value.name?.trim()) return false
+    if (!form.value.providerId?.trim()) return false
+    if (!form.value.modelId?.trim()) return false
     return true
   })
   const canRefreshModelOptions = computed(() => {
@@ -184,6 +240,43 @@ export function useTextModelManager() {
 
   const isDefaultModel = (id: string) => {
     return getBuiltinModelIds().includes(id)
+  }
+
+  const getCustomHeaderValidationMessage = () => {
+    if (form.value.providerId !== 'openai-compatible') return null
+
+    const validation = validateCustomRequestHeaders(
+      form.value.connectionConfig.customHeaders as CustomRequestHeaderInput
+    )
+    if (validation.valid) return null
+
+    const details = validation.errors
+      .map((error) => {
+        const reasonKey = `modelManager.customHeaders.validation.${error.reason}`
+        const reason = t(reasonKey)
+        return `${error.key}: ${reason === reasonKey ? error.reason : reason}`
+      })
+      .join('; ')
+
+    return t('modelManager.customHeaders.validationError', { details })
+  }
+
+  const normalizeConnectionCustomHeaders = (connectionConfig: TextConnectionConfig): TextConnectionConfig => {
+    if (form.value.providerId !== 'openai-compatible') {
+      connectionConfig.customHeaders = undefined
+      return connectionConfig
+    }
+
+    const customHeaders = normalizeCustomRequestHeaders(
+      connectionConfig.customHeaders as CustomRequestHeaderInput
+    )
+    if (customHeaders) {
+      connectionConfig.customHeaders = customHeaders
+    } else {
+      connectionConfig.customHeaders = undefined
+    }
+
+    return connectionConfig
   }
 
   const resetFormState = () => {
@@ -202,6 +295,8 @@ export function useTextModelManager() {
     formReady.value = false
     modelOptions.value = []
     formConnectionStatus.value = null
+    chromeBuiltInStatus.value = null
+    chromeBuiltInDownloadProgress.value = null
   }
 
   const ensureProvidersLoaded = async () => {
@@ -211,7 +306,7 @@ export function useTextModelManager() {
       providers.value = textAdapterRegistry?.getAllProviders?.() || []
       providersLoaded.value = true
     } catch (error) {
-      console.error('加载文本模型提供商失败:', error)
+      console.error('Failed to load text model providers:', error)
       toast.error(t('modelManager.loadFailed'))
       providers.value = []
     } finally {
@@ -231,8 +326,82 @@ export function useTextModelManager() {
         label: model.name || model.id
       }))
     } catch (error) {
-      console.error('加载 Provider 模型失败:', error)
+      console.error('Failed to load provider models:', error)
       modelOptions.value = []
+    }
+  }
+
+  const isUnknownIdentity = (value: unknown) => {
+    return typeof value !== 'string' || value.trim().length === 0 || value === 'unknown'
+  }
+
+  const getEditableIdentity = (model: TextModelConfig) => {
+    const providerId = model.providerId ?? model.providerMeta?.id ?? ''
+    const modelId = model.modelId ?? model.modelMeta?.id ?? ''
+    const providerExists = providers.value.some(provider => provider.id === providerId)
+
+    if (isUnknownIdentity(providerId) || isUnknownIdentity(modelId) || !providerExists) {
+      return { providerId: '', modelId: '' }
+    }
+
+    return { providerId, modelId }
+  }
+
+  const refreshChromeBuiltInStatus = async () => {
+    if (!isChromeBuiltInProvider.value) {
+      chromeBuiltInStatus.value = null
+      chromeBuiltInDownloadProgress.value = null
+      return
+    }
+
+    isCheckingChromeBuiltIn.value = true
+    try {
+      chromeBuiltInStatus.value = await checkChromeBuiltInAvailability()
+    } catch (error) {
+      chromeBuiltInStatus.value = {
+        availability: 'unavailable',
+        error: getErrorDetail(error)
+      }
+    } finally {
+      isCheckingChromeBuiltIn.value = false
+    }
+  }
+
+  const prepareChromeBuiltInDownload = async () => {
+    if (!isChromeBuiltInProvider.value || isPreparingChromeBuiltIn.value) return
+
+    isPreparingChromeBuiltIn.value = true
+    chromeBuiltInDownloadProgress.value = null
+    formConnectionStatus.value = { type: 'info', message: t('modelManager.chromeBuiltIn.preparing') }
+
+    try {
+      chromeBuiltInStatus.value = await prepareChromeBuiltInModel((progress) => {
+        chromeBuiltInDownloadProgress.value = progress
+        chromeBuiltInStatus.value = { availability: 'downloading' }
+      })
+
+      if (chromeBuiltInStatus.value.availability === 'available') {
+        form.value.enabled = true
+        formConnectionStatus.value = { type: 'success', message: t('modelManager.chromeBuiltIn.ready') }
+        toast.success(t('modelManager.chromeBuiltIn.ready'))
+      } else {
+        formConnectionStatus.value = {
+          type: 'warning',
+          message: t(`modelManager.chromeBuiltIn.status.${chromeBuiltInStatus.value.availability}`)
+        }
+      }
+    } catch (error) {
+      chromeBuiltInStatus.value = {
+        availability: 'unavailable',
+        error: getErrorDetail(error)
+      }
+      formConnectionStatus.value = {
+        type: 'error',
+        message: t('modelManager.chromeBuiltIn.prepareFailed', { error: getErrorDetail(error) })
+      }
+      toast.error(t('modelManager.chromeBuiltIn.prepareFailed', { error: getErrorDetail(error) }))
+    } finally {
+      isPreparingChromeBuiltIn.value = false
     }
   }
 
@@ -254,7 +423,7 @@ export function useTextModelManager() {
           return a.name.localeCompare(b.name)
         })
     } catch (error) {
-      console.error('加载模型失败:', error)
+      console.error('Failed to load models:', error)
       toast.error(t('modelManager.loadFailed'))
     } finally {
       loadingModels.value = false
@@ -272,13 +441,12 @@ export function useTextModelManager() {
       await llmService.testConnection(id)
       toast.success(t('modelManager.testSuccess', { provider: model.name }))
     } catch (error) {
-      console.error('连接测试失败:', error)
+      console.error('Connection test failed:', error)
       const model = await modelManager.getModel(id)
       const modelName = model?.name || id
-      const errorMessage = getI18nErrorMessage(error, 'Unknown error')
       toast.error(t('modelManager.testFailed', {
         provider: modelName,
-        error: errorMessage
+        error: getErrorDetail(error)
       }))
     } finally {
       delete testingConnections.value[id]
@@ -289,13 +457,16 @@ export function useTextModelManager() {
     try {
       const model = await modelManager.getModel(id)
       if (!model) throw new Error(t('modelManager.noModelsAvailable'))
-      await modelManager.enableModel(id)
+      if (id === CHROME_BUILT_IN_PROVIDER_ID) {
+        await modelManager.updateModel(id, markChromeBuiltInUserConfigured(model, true))
+      } else {
+        await modelManager.enableModel(id)
+      }
       await loadModels()
       toast.success(t('modelManager.enableSuccess'))
     } catch (error: unknown) {
-      console.error('启用模型失败:', error)
-      const message = getI18nErrorMessage(error, 'Unknown error')
-      toast.error(t('modelManager.enableFailed', { error: message }))
+      console.error('Failed to enable model:', error)
+      toast.error(withLocalizedError('modelManager.enableFailed', error))
     }
   }
 
@@ -303,13 +474,61 @@ export function useTextModelManager() {
     try {
       const model = await modelManager.getModel(id)
       if (!model) throw new Error(t('modelManager.noModelsAvailable'))
-      await modelManager.disableModel(id)
+      if (id === CHROME_BUILT_IN_PROVIDER_ID) {
+        await modelManager.updateModel(id, markChromeBuiltInUserConfigured(model, false))
+      } else {
+        await modelManager.disableModel(id)
+      }
       await loadModels()
       toast.success(t('modelManager.disableSuccess'))
     } catch (error: unknown) {
-      console.error('禁用模型失败:', error)
-      const message = getI18nErrorMessage(error, 'Unknown error')
-      toast.error(t('modelManager.disableFailed', { error: message }))
+      console.error('Failed to disable model:', error)
+      toast.error(withLocalizedError('modelManager.disableFailed', error))
+    }
+  }
+
+  const prepareForClone = async (id: string) => {
+    try {
+      const model = await modelManager.getModel(id)
+      if (!model) throw new Error(t('modelManager.noModelsAvailable'))
+
+      resetFormState()
+      await ensureProvidersLoaded()
+      formReady.value = false
+
+      form.value = {
+        id: '',
+        name: `${model.name || id} (Copy)`,
+        enabled: model.enabled,
+        providerId: getEditableIdentity(model).providerId,
+        modelId: getEditableIdentity(model).modelId,
+        connectionConfig: JSON.parse(JSON.stringify(model.connectionConfig ?? {})) as TextConnectionConfig,
+        paramOverrides: model.paramOverrides ? JSON.parse(JSON.stringify(model.paramOverrides)) : {},
+        displayMaskedKey: false,
+        originalApiKey: typeof model.connectionConfig?.apiKey === 'string' ? model.connectionConfig.apiKey : undefined,
+        defaultModel: getEditableIdentity(model).modelId
+      }
+      editingModelMeta.value = form.value.modelId ? model.modelMeta : null
+
+      if (form.value.providerId) {
+        setProvider(form.value.providerId, {
+          autoSelectFirstModel: false,
+          resetOverrides: false,
+          resetConnectionConfig: false
+        })
+      } else {
+        modelOptions.value = []
+      }
+
+      if (!modelOptions.value.some(option => option.value === form.value.modelId) && form.value.modelId) {
+        modelOptions.value.push({ value: form.value.modelId, label: form.value.modelId })
+      }
+    } catch (error: unknown) {
+      console.error('Failed to prepare clone model draft:', error)
+      toast.error(t('modelManager.cloneFailed'))
+      throw error
+    } finally {
+      formReady.value = true
     }
   }
 
@@ -319,9 +538,8 @@ export function useTextModelManager() {
       await loadModels()
       toast.success(t('modelManager.deleteSuccess'))
     } catch (error: unknown) {
-      console.error('删除模型失败:', error)
-      const message = getI18nErrorMessage(error, 'Unknown error')
-      toast.error(t('modelManager.deleteFailed', { error: message }))
+      console.error('Failed to delete model:', error)
+      toast.error(withLocalizedError('modelManager.deleteFailed', error))
     }
   }
 
@@ -342,9 +560,14 @@ export function useTextModelManager() {
       resetConnectionConfig = true
     } = options
 
+    const repairingMissingProvider = !form.value.providerId && !!providerId
+    const shouldResetOverrides = resetOverrides && !repairingMissingProvider
+    const shouldResetConnectionConfig = resetConnectionConfig && !repairingMissingProvider
+
     form.value.providerId = providerId
     formConnectionStatus.value = null
-    if (resetOverrides) {
+    chromeBuiltInDownloadProgress.value = null
+    if (shouldResetOverrides) {
       form.value.paramOverrides = {}
     }
 
@@ -361,7 +584,7 @@ export function useTextModelManager() {
     form.value.connectionConfig = computeConnectionConfig(
       form.value.connectionConfig,
       providerMeta,
-      resetConnectionConfig
+      shouldResetConnectionConfig
     ) as TextConnectionConfig
 
     if (autoSelectFirstModel && modelOptions.value.length > 0) {
@@ -369,7 +592,7 @@ export function useTextModelManager() {
       form.value.modelId = firstModelId
       form.value.defaultModel = firstModelId
       // 切换提供商后自动应用第一个模型的默认参数
-      if (firstModelId && providerId) {
+      if (firstModelId && providerId && !repairingMissingProvider) {
         advancedParameters.applyDefaultsFromModel(false)
       }
     }
@@ -396,11 +619,11 @@ export function useTextModelManager() {
 
   const prepareForEdit = async (id: string, forceReload = true) => {
     // 如果已经在编辑同一个模型且不强制重新加载，则跳过
-  if (!forceReload && editingModelId.value === id && formReady.value) {
-    return
-  }
+    if (!forceReload && editingModelId.value === id && formReady.value) {
+      return
+    }
 
-  resetFormState()
+    resetFormState()
     editingModelId.value = id
     await ensureProvidersLoaded()
     formReady.value = false
@@ -422,21 +645,25 @@ export function useTextModelManager() {
         originalId: model.id,
         name: model.name,
         enabled: model.enabled,
-        providerId: model.providerMeta?.id ?? 'custom',
-        modelId: model.modelMeta?.id ?? '',
+        providerId: getEditableIdentity(model).providerId,
+        modelId: getEditableIdentity(model).modelId,
         connectionConfig,
         paramOverrides: model.paramOverrides ? JSON.parse(JSON.stringify(model.paramOverrides)) : {},
         displayMaskedKey: !!rawApiKey,
         originalApiKey: String(rawApiKey) || undefined,
-        defaultModel: String(model.modelMeta?.id ?? '')
+        defaultModel: getEditableIdentity(model).modelId
       }
-      editingModelMeta.value = model.modelMeta
+      editingModelMeta.value = form.value.modelId ? model.modelMeta : null
 
-      setProvider(form.value.providerId, {
-        autoSelectFirstModel: false,
-        resetOverrides: false,
-        resetConnectionConfig: false
-      })
+      if (form.value.providerId) {
+        setProvider(form.value.providerId, {
+          autoSelectFirstModel: false,
+          resetOverrides: false,
+          resetConnectionConfig: false
+        })
+      } else {
+        modelOptions.value = []
+      }
       if (!modelOptions.value.some(option => option.value === form.value.modelId) && form.value.modelId) {
         modelOptions.value.push({ value: form.value.modelId, label: form.value.modelId })
       }
@@ -444,7 +671,7 @@ export function useTextModelManager() {
       // 编辑时不自动刷新模型列表，避免不必要的网络请求和延迟
       // 用户可以通过手动点击刷新按钮来获取最新模型列表
     } catch (error) {
-      console.error('加载模型失败:', error)
+      console.error('Failed to load models:', error)
       toast.error(t('modelManager.loadFailed'))
     } finally {
       formReady.value = true
@@ -453,6 +680,12 @@ export function useTextModelManager() {
 
   const refreshModelOptions = async (showSuccess = true) => {
     if (!form.value.providerId) return
+
+    const customHeaderError = getCustomHeaderValidationMessage()
+    if (customHeaderError) {
+      toast.error(customHeaderError)
+      return
+    }
 
     const baseURL = (form.value.connectionConfig.baseURL as string)?.trim()
     if (!baseURL) {
@@ -473,11 +706,15 @@ export function useTextModelManager() {
           ? form.value.originalApiKey
           : form.value.connectionConfig.apiKey
       }
+      normalizeConnectionCustomHeaders(connectionConfig)
 
       const existingConfig = form.value.originalId ? await modelManager.getModel(form.value.originalId) : undefined
 
-      let providerMeta = providers.value.find(p => p.id === providerTemplateId) || existingConfig?.providerMeta
-      let modelMeta = existingConfig?.modelMeta
+      let { providerMeta, modelMeta } = resolveFormMetadata(
+        providerTemplateId,
+        form.value.modelId,
+        existingConfig
+      )
 
       if (textAdapterRegistry && providerTemplateId) {
         try {
@@ -501,6 +738,8 @@ export function useTextModelManager() {
       }
 
       const fetchedModels = await llmService.fetchModelList(providerTemplateId, {
+        providerId: providerMeta?.id || providerTemplateId,
+        modelId: form.value.modelId || modelMeta?.id,
         connectionConfig,
         providerMeta,
         modelMeta: modelMeta ? { ...modelMeta, id: form.value.modelId || modelMeta.id } : undefined
@@ -513,15 +752,16 @@ export function useTextModelManager() {
 
       if (fetchedModels.length > 0 && !fetchedModels.some((m: { value: string }) => m.value === form.value.modelId)) {
         form.value.modelId = fetchedModels[0].value
+        form.value.defaultModel = fetchedModels[0].value
       }
     } catch (error: unknown) {
-      console.error('获取模型列表失败:', error)
+      console.error('Failed to fetch model list:', error)
 
       // Keep UX consistent: if dynamic fetch fails, fall back to static models
       // but surface the failure to avoid a misleading "success" toast.
-      const errorMessage = getI18nErrorMessage(error, t('modelManager.loadFailed'))
+      const errorMessage = getErrorDetail(error, t('modelManager.loadFailed'))
 
-      let staticCount = 0
+      let staticCount: number
       try {
         const staticModels = textAdapterRegistry.getStaticModels(providerTemplateId)
         staticCount = staticModels.length
@@ -541,31 +781,26 @@ export function useTextModelManager() {
     }
   }
 
-  const ensureProviderMeta = (providerId: string, existing?: TextProvider) => {
-    if (existing) return existing
-    const adapter = textAdapterRegistry.getAdapter(providerId)
-    return adapter.getProvider()
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const ensureModelMeta = (providerId: string, modelId: string, _existing?: TextModel) => {
-    const adapter = textAdapterRegistry.getAdapter(providerId)
-    const staticModels = adapter.getModels()
-    const foundModel = staticModels.find((m: TextModel) => m.id === modelId)
-    if (foundModel) {
-      return foundModel
-    }
-    return adapter.buildDefaultModel(modelId)
-  }
+  const resolveFormMetadata = (
+    providerId: string,
+    modelId: string,
+    existingConfig?: TextModelConfig
+  ) => resolveTextModelMetadata({
+    providerId,
+    modelId,
+    registry: textAdapterRegistry,
+    existingProviderMeta: existingConfig?.providerMeta,
+    existingModelMeta: existingConfig?.modelMeta
+  })
 
   const updateExistingModel = async () => {
     if (!form.value.originalId) {
-      throw new Error('编辑会话无效')
+      throw new Error('Invalid edit session')
     }
 
     const existingConfig = await modelManager.getModel(form.value.originalId)
     if (!existingConfig) {
-      throw new Error('模型不存在')
+      throw new Error('Model not found')
     }
 
     const connectionConfig: TextConnectionConfig = {
@@ -584,18 +819,27 @@ export function useTextModelManager() {
     } else {
       delete connectionConfig.apiKey
     }
+    normalizeConnectionCustomHeaders(connectionConfig)
 
-    const providerMeta = ensureProviderMeta(form.value.providerId, existingConfig.providerMeta)
-    const modelMeta = ensureModelMeta(form.value.providerId, form.value.modelId, existingConfig.modelMeta)
+    const { providerMeta, modelMeta } = resolveFormMetadata(
+      form.value.providerId,
+      form.value.modelId,
+      existingConfig
+    )
 
     const updates = {
       name: form.value.name,
       enabled: form.value.enabled,
+      providerId: form.value.providerId,
+      modelId: form.value.modelId,
       providerMeta,
       modelMeta,
       connectionConfig,
       paramOverrides: { ...(form.value.paramOverrides || {}) }
     } as Partial<TextModelConfig>
+    if (form.value.originalId === CHROME_BUILT_IN_PROVIDER_ID || providerMeta.id === CHROME_BUILT_IN_PROVIDER_ID) {
+      updates.activationState = markChromeBuiltInUserConfigured(existingConfig, form.value.enabled).activationState
+    }
 
     await modelManager.updateModel(form.value.originalId, updates)
     return form.value.originalId
@@ -620,16 +864,28 @@ export function useTextModelManager() {
       throw new Error(t('modelManager.modelIdGenerateFailed'))
     }
 
-    const providerMeta = ensureProviderMeta(form.value.providerId)
-    const modelMeta = ensureModelMeta(form.value.providerId, form.value.defaultModel || form.value.modelId)
+    const { providerMeta, modelMeta } = resolveFormMetadata(
+      form.value.providerId,
+      form.value.defaultModel || form.value.modelId
+    )
+
+    const connectionConfig: TextConnectionConfig = {
+      ...form.value.connectionConfig
+    }
+    if (form.value.displayMaskedKey && form.value.originalApiKey) {
+      connectionConfig.apiKey = form.value.originalApiKey
+    }
+    normalizeConnectionCustomHeaders(connectionConfig)
 
     const newConfig = {
       id: modelKey,
       name: form.value.name,
       enabled: form.value.enabled,
+      providerId: providerMeta.id,
+      modelId: modelMeta.id,
       providerMeta,
       modelMeta,
-      connectionConfig: { ...form.value.connectionConfig },
+      connectionConfig,
       paramOverrides: { ...(form.value.paramOverrides ?? {}) }
     } as TextModelConfig
 
@@ -639,8 +895,16 @@ export function useTextModelManager() {
 
   const saveForm = async () => {
     if (isSaving.value) return null
+    if (!canSaveForm.value) {
+      throw new Error('No provider or model selected')
+    }
     isSaving.value = true
     try {
+      const customHeaderError = getCustomHeaderValidationMessage()
+      if (customHeaderError) {
+        throw new Error(customHeaderError)
+      }
+
       const savedId = editingModelId.value ? await updateExistingModel() : await createNewModel()
       await loadModels()
       return savedId
@@ -658,14 +922,22 @@ export function useTextModelManager() {
 
     try {
       if (!form.value.providerId || !form.value.modelId) {
-        throw new Error('模型未选择')
+        throw new Error('No model selected')
+      }
+
+      const customHeaderError = getCustomHeaderValidationMessage()
+      if (customHeaderError) {
+        throw new Error(customHeaderError)
       }
 
       // 编辑模式下获取现有配置，新增模式下为 undefined
       const existingConfig = editingModelId.value ? await modelManager.getModel(editingModelId.value) : undefined
 
-      const providerMeta = ensureProviderMeta(form.value.providerId, existingConfig?.providerMeta)
-      const modelMeta = ensureModelMeta(form.value.providerId, form.value.modelId, existingConfig?.modelMeta)
+      const { providerMeta, modelMeta } = resolveFormMetadata(
+        form.value.providerId,
+        form.value.modelId,
+        existingConfig
+      )
 
       const baseURL = typeof form.value.connectionConfig?.baseURL === 'string'
         ? form.value.connectionConfig.baseURL.trim()
@@ -679,11 +951,14 @@ export function useTextModelManager() {
           ? form.value.originalApiKey
           : (form.value.connectionConfig.apiKey || existingConfig?.connectionConfig?.apiKey)
       }
+      normalizeConnectionCustomHeaders(connectionConfig)
 
       const tempConfig = {
         id: `temp-test-${editingModelId.value || 'new'}-${Date.now()}`,
         name: form.value.name || form.value.modelId,
         enabled: form.value.enabled,
+        providerId: providerMeta.id,
+        modelId: modelMeta.id,
         providerMeta,
         modelMeta,
         connectionConfig,
@@ -703,18 +978,19 @@ export function useTextModelManager() {
         try {
           await modelManager.deleteModel(tempConfig.id)
         } catch (cleanupError) {
-          console.warn('清理临时测试模型失败:', cleanupError)
+          console.warn('Failed to clean up temporary test model:', cleanupError)
         }
       }
 
     } catch (error) {
-      console.error('连接测试失败:', error)
+      console.error('Connection test failed:', error)
       const displayName = form.value.name || form.value.modelId
+      const summary = t('modelManager.testConnection')
       formConnectionStatus.value = {
         type: 'error',
-        message: t('modelManager.testFailed', { provider: displayName, error: error instanceof Error ? error.message : 'Unknown error' })
+        message: formatErrorSummary(`${summary} (${displayName})`, error)
       }
-      toast.error(t('modelManager.testFailed', { provider: displayName, error: error instanceof Error ? error.message : 'Unknown error' }))
+      toast.error(withLocalizedError('modelManager.testFailed', error, { provider: displayName }))
     } finally {
       isTestingFormConnection.value = false
     }
@@ -729,6 +1005,13 @@ export function useTextModelManager() {
       form.value.originalApiKey = val
     }
   })
+
+  watch(
+    () => form.value.providerId,
+    () => {
+      void refreshChromeBuiltInStatus()
+    }
+  )
 
   const onModelChange = (modelId: string) => {
     form.value.modelId = modelId
@@ -752,6 +1035,7 @@ export function useTextModelManager() {
     testConfigConnection,
     enableModel,
     disableModel,
+    prepareForClone,
     deleteModel,
 
     // providers
@@ -764,6 +1048,7 @@ export function useTextModelManager() {
     form,
     formReady,
     isSaving,
+    canSaveForm,
     modalTitle,
     editingModelId,
     providerOptions,
@@ -773,6 +1058,13 @@ export function useTextModelManager() {
     currentParameterDefinitions,
     availableParameterCount,
     currentProviderType,
+    isChromeBuiltInProvider,
+    chromeBuiltInStatus,
+    isCheckingChromeBuiltIn,
+    isPreparingChromeBuiltIn,
+    chromeBuiltInDownloadProgress,
+    refreshChromeBuiltInStatus,
+    prepareChromeBuiltInDownload,
     selectedProvider,
     updateParamOverrides,
     onModelChange,

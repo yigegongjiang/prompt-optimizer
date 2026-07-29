@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TextAdapterRegistry } from '../../../src/services/llm/adapters/registry';
 import type { TextModelConfig } from '../../../src/services/llm/types';
 
@@ -7,6 +7,10 @@ describe('TextAdapterRegistry', () => {
 
   beforeEach(() => {
     registry = new TextAdapterRegistry();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   describe('getAdapter', () => {
@@ -66,6 +70,35 @@ describe('TextAdapterRegistry', () => {
       expect(adapter.getProvider().id).toBe('dashscope');
     });
 
+    it('should return Cloudflare adapter for "cloudflare" provider', () => {
+      const adapter = registry.getAdapter('cloudflare');
+
+      expect(adapter).toBeDefined();
+      expect(adapter.getProvider().id).toBe('cloudflare');
+    });
+
+    it('should return Grok adapter for "grok" provider', () => {
+      const adapter = registry.getAdapter('grok');
+
+      expect(adapter).toBeDefined();
+      expect(adapter.getProvider().id).toBe('grok');
+    });
+
+    it('should return Xiaomi MiMo Token Plan adapter for "xiaomi-mimo-token-plan" provider', () => {
+      const adapter = registry.getAdapter('xiaomi-mimo-token-plan');
+
+      expect(adapter).toBeDefined();
+      expect(adapter.getProvider().id).toBe('xiaomi-mimo-token-plan');
+    });
+
+    it('should return Chrome built-in adapter for "chrome-built-in" provider', () => {
+      const adapter = registry.getAdapter('chrome-built-in');
+
+      expect(adapter).toBeDefined();
+      expect(adapter.getProvider().id).toBe('chrome-built-in');
+      expect(adapter.getProvider().requiresApiKey).toBe(false);
+    });
+
     it('should be case-insensitive for provider ID', () => {
       const adapter1 = registry.getAdapter('OpenAI');
       const adapter2 = registry.getAdapter('OPENAI');
@@ -85,11 +118,11 @@ describe('TextAdapterRegistry', () => {
       const providers = registry.getAllProviders();
 
       expect(Array.isArray(providers)).toBe(true);
-      expect(providers.length).toBe(11);
+      expect(providers.length).toBe(16);
 
       const providerIds = providers.map(p => p.id);
       expect(providerIds).toEqual(
-        expect.arrayContaining(['openai', 'deepseek', 'siliconflow', 'zhipu', 'gemini', 'anthropic', 'dashscope', 'openrouter', 'modelscope', 'ollama', 'minimax'])
+        expect.arrayContaining(['openai', 'openai-compatible', 'deepseek', 'siliconflow', 'zhipu', 'gemini', 'anthropic', 'dashscope', 'openrouter', 'modelscope', 'ollama', 'minimax', 'cloudflare', 'grok', 'chrome-built-in', 'xiaomi-mimo-token-plan'])
       );
     });
 
@@ -226,7 +259,8 @@ describe('TextAdapterRegistry', () => {
     });
 
     it('should fallback to static models on dynamic fetch error', async () => {
-      // OpenAI supports dynamic but will fail without real API
+      vi.spyOn(registry, 'getDynamicModels').mockRejectedValueOnce(new Error('network failure'));
+
       const models = await registry.getModels('openai', mockConfig);
 
       // Should fallback to static models

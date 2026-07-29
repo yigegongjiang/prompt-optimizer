@@ -6,31 +6,30 @@
  */
 
 import { defineStore } from 'pinia'
-import { ref, type Ref } from 'vue'
+import { ref } from 'vue'
 import { getPiniaServices } from '../../plugins/pinia'
-import { TEMPLATE_SELECTION_KEYS } from '@prompt-optimizer/core'
+import { TEMPLATE_SELECTION_KEYS, type PromptAssetBinding, type PromptSessionOrigin } from '@prompt-optimizer/core'
+import { coerceTestPanelVersionValue } from '../../utils/testPanelVersion'
+import { createSessionAssetBindingState } from './sessionAssetBinding'
 import {
+  createDefaultCompareSnapshotRoles,
+  createDefaultCompareSnapshotRoleSignatures,
   createDefaultEvaluationResults,
+  sanitizeCompareSnapshotRoles,
+  sanitizeCompareSnapshotRoleSignatures,
+  type PersistedCompareSnapshotRoles,
+  type PersistedCompareSnapshotRoleSignatures,
   type PersistedEvaluationResults,
 } from '../../types/evaluation'
 
 /**
- * 测试结果结构
- */
-export interface TestResults {
-  originalResult: string
-  originalReasoning: string
-  optimizedResult: string
-  optimizedReasoning: string
-}
-
-/**
  * basic-user 测试面板的版本选择：
+ * - 'workspace': 下方工作区当前内容（未保存草稿也算）
+ * - 'previous': 动态指向最近保存版本的上一版
  * - 0: v0（原始提示词）
  * - >=1: v1..vn（历史链版本号）
- * - 'latest': 跟随最新 vn
  */
-export type TestPanelVersionValue = 0 | number | 'latest'
+export type TestPanelVersionValue = 'workspace' | 'previous' | 0 | number
 
 export type TestVariantId = 'a' | 'b' | 'c' | 'd'
 
@@ -75,9 +74,6 @@ export interface BasicUserSessionState {
   // 测试区域内容
   testContent: string
 
-  // 测试结果
-  testResults: TestResults | null
-
   // 测试布局与列配置（basic-user 专用：最多 4 列）
   layout: BasicUserLayoutConfig
   testVariants: TestVariantConfig[]
@@ -88,6 +84,8 @@ export interface BasicUserSessionState {
 
   // 评估结果（分类型持久化，用于重启恢复）
   evaluationResults: PersistedEvaluationResults
+  compareSnapshotRoles: PersistedCompareSnapshotRoles<TestVariantId>
+  compareSnapshotRoleSignatures: PersistedCompareSnapshotRoleSignatures<TestVariantId>
 
   // 模型和模板选择（只存 ID/key，不存对象）
   selectedOptimizeModelKey: string
@@ -100,6 +98,10 @@ export interface BasicUserSessionState {
 
   // 最后活跃时间
   lastActiveAt: number
+
+  // 标准提示词资产来源坐标（内部无感 session metadata）
+  assetBinding?: PromptAssetBinding
+  origin?: PromptSessionOrigin
 }
 
 /**
@@ -112,16 +114,15 @@ const createDefaultState = (): BasicUserSessionState => ({
   chainId: '',
   versionId: '',
   testContent: '',
-  testResults: null,
   layout: {
     mainSplitLeftPct: 50,
     testColumnCount: 2,
   },
   testVariants: [
     { id: 'a', version: 0, modelKey: '' },
-    { id: 'b', version: 'latest', modelKey: '' },
-    { id: 'c', version: 'latest', modelKey: '' },
-    { id: 'd', version: 'latest', modelKey: '' },
+    { id: 'b', version: 'workspace', modelKey: '' },
+    { id: 'c', version: 'workspace', modelKey: '' },
+    { id: 'd', version: 'workspace', modelKey: '' },
   ],
   testVariantResults: {
     a: { result: '', reasoning: '' },
@@ -136,12 +137,16 @@ const createDefaultState = (): BasicUserSessionState => ({
     d: '',
   },
   evaluationResults: createDefaultEvaluationResults(),
+  compareSnapshotRoles: createDefaultCompareSnapshotRoles<TestVariantId>(),
+  compareSnapshotRoleSignatures: createDefaultCompareSnapshotRoleSignatures<TestVariantId>(),
   selectedOptimizeModelKey: '',
   selectedTestModelKey: '',
   selectedTemplateId: null,
   selectedIterateTemplateId: null,
   isCompareMode: true,
   lastActiveAt: Date.now(),
+  assetBinding: undefined,
+  origin: undefined,
 })
 
 export const useBasicUserSession = defineStore('basicUserSession', () => {
@@ -159,9 +164,6 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
   // 测试区域内容
   const testContent = ref('')
 
-  // 测试结果
-  const testResults = ref<TestResults | null>(null)
-
   // 测试布局与列配置
   const layout = ref<BasicUserLayoutConfig>({
     mainSplitLeftPct: 50,
@@ -170,9 +172,9 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
 
   const testVariants = ref<TestVariantConfig[]>([
     { id: 'a', version: 0, modelKey: '' },
-    { id: 'b', version: 'latest', modelKey: '' },
-    { id: 'c', version: 'latest', modelKey: '' },
-    { id: 'd', version: 'latest', modelKey: '' },
+    { id: 'b', version: 'workspace', modelKey: '' },
+    { id: 'c', version: 'workspace', modelKey: '' },
+    { id: 'd', version: 'workspace', modelKey: '' },
   ])
 
   // 测试结果（按列持久化）
@@ -192,6 +194,12 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
 
   // 评估结果
   const evaluationResults = ref<PersistedEvaluationResults>(createDefaultEvaluationResults())
+  const compareSnapshotRoles = ref<PersistedCompareSnapshotRoles<TestVariantId>>(
+    createDefaultCompareSnapshotRoles<TestVariantId>()
+  )
+  const compareSnapshotRoleSignatures = ref<PersistedCompareSnapshotRoleSignatures<TestVariantId>>(
+    createDefaultCompareSnapshotRoleSignatures<TestVariantId>()
+  )
 
   // 模型和模板选择（只存 ID/key，不存对象）
   const selectedOptimizeModelKey = ref('')
@@ -204,6 +212,14 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
 
   // 最后活跃时间
   const lastActiveAt = ref(Date.now())
+  const assetBindingState = createSessionAssetBindingState(
+    () => {
+      lastActiveAt.value = Date.now()
+    },
+    () => {
+      void saveSession()
+    },
+  )
 
   /**
    * 更新提示词
@@ -228,6 +244,10 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
     const nextChainId = payload.chainId
     const nextVersionId = payload.versionId
 
+    if (!nextChainId && !nextVersionId) {
+      assetBindingState.clearAssetBindingWithoutPersist()
+    }
+
     const changed =
       optimizedPrompt.value !== nextOptimizedPrompt ||
       reasoning.value !== nextReasoning ||
@@ -240,29 +260,6 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
     reasoning.value = nextReasoning
     chainId.value = nextChainId
     versionId.value = nextVersionId
-    lastActiveAt.value = Date.now()
-  }
-
-  /**
-   * 更新测试结果
-   */
-  const updateTestResults = (results: TestResults | null) => {
-    const prev = testResults.value
-
-    // 检查是否相同
-    const isSame =
-      prev === results ||
-      (!!prev &&
-        !!results &&
-        prev.originalResult === results.originalResult &&
-        prev.originalReasoning === results.originalReasoning &&
-        prev.optimizedResult === results.optimizedResult &&
-        prev.optimizedReasoning === results.optimizedReasoning)
-
-    if (isSame) return
-
-    // 直接赋值给 ref（现在是响应式的）
-    testResults.value = results
     lastActiveAt.value = Date.now()
   }
 
@@ -303,6 +300,38 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
     testVariants.value = nextList
     lastActiveAt.value = Date.now()
     saveSession()
+  }
+
+  /**
+   * 重置多列测试结果与最近运行指纹
+   */
+  const resetTestVariantState = () => {
+    const defaultState = createDefaultState()
+    testVariantResults.value = defaultState.testVariantResults
+    testVariantLastRunFingerprint.value = defaultState.testVariantLastRunFingerprint
+    lastActiveAt.value = Date.now()
+  }
+
+  const clearContent = (options: { persist?: boolean } = {}) => {
+    const defaultState = createDefaultState()
+    prompt.value = defaultState.prompt
+    optimizedPrompt.value = defaultState.optimizedPrompt
+    reasoning.value = defaultState.reasoning
+    chainId.value = defaultState.chainId
+    versionId.value = defaultState.versionId
+    testContent.value = defaultState.testContent
+    testVariantResults.value = defaultState.testVariantResults
+    testVariantLastRunFingerprint.value = defaultState.testVariantLastRunFingerprint
+    evaluationResults.value = defaultState.evaluationResults
+    compareSnapshotRoles.value = defaultState.compareSnapshotRoles
+    compareSnapshotRoleSignatures.value = defaultState.compareSnapshotRoleSignatures
+    assetBindingState.clearAssetBindingWithoutPersist()
+    lastActiveAt.value = Date.now()
+    if (options.persist !== false) {
+      void saveSession().catch((error) => {
+        console.error('[BasicUserSession] Failed to persist cleared content:', error)
+      })
+    }
   }
 
   /**
@@ -365,6 +394,16 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
     lastActiveAt.value = Date.now()
   }
 
+  const updateCompareSnapshotRoles = (
+    roles: PersistedCompareSnapshotRoles<TestVariantId>,
+    signatures: PersistedCompareSnapshotRoleSignatures<TestVariantId>,
+  ) => {
+    compareSnapshotRoles.value = { ...roles }
+    compareSnapshotRoleSignatures.value = { ...signatures }
+    lastActiveAt.value = Date.now()
+    saveSession()
+  }
+
   /**
    * 重置状态
    */
@@ -376,17 +415,19 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
     chainId.value = defaultState.chainId
     versionId.value = defaultState.versionId
     testContent.value = defaultState.testContent
-    testResults.value = defaultState.testResults
     layout.value = defaultState.layout
     testVariants.value = defaultState.testVariants
     testVariantResults.value = defaultState.testVariantResults
     testVariantLastRunFingerprint.value = defaultState.testVariantLastRunFingerprint
     evaluationResults.value = defaultState.evaluationResults
+    compareSnapshotRoles.value = defaultState.compareSnapshotRoles
+    compareSnapshotRoleSignatures.value = defaultState.compareSnapshotRoleSignatures
     selectedOptimizeModelKey.value = defaultState.selectedOptimizeModelKey
     selectedTestModelKey.value = defaultState.selectedTestModelKey
     selectedTemplateId.value = defaultState.selectedTemplateId
     selectedIterateTemplateId.value = defaultState.selectedIterateTemplateId
     isCompareMode.value = defaultState.isCompareMode
+    assetBindingState.resetAssetBinding()
     lastActiveAt.value = Date.now()
   }
 
@@ -397,7 +438,7 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
   const saveSession = async () => {
     const $services = getPiniaServices()
     if (!$services?.preferenceService) {
-      console.warn('[BasicUserSession] PreferenceService 不可用，无法保存会话')
+      console.warn('[BasicUserSession] PreferenceService is unavailable; cannot save session')
       return
     }
 
@@ -409,25 +450,27 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
         chainId: chainId.value,
         versionId: versionId.value,
         testContent: testContent.value,
-        testResults: testResults.value,
         layout: layout.value,
         testVariants: testVariants.value,
         testVariantResults: testVariantResults.value,
         testVariantLastRunFingerprint: testVariantLastRunFingerprint.value,
         evaluationResults: evaluationResults.value,
+        compareSnapshotRoles: compareSnapshotRoles.value,
+        compareSnapshotRoleSignatures: compareSnapshotRoleSignatures.value,
         selectedOptimizeModelKey: selectedOptimizeModelKey.value,
         selectedTestModelKey: selectedTestModelKey.value,
         selectedTemplateId: selectedTemplateId.value,
         selectedIterateTemplateId: selectedIterateTemplateId.value,
         isCompareMode: isCompareMode.value,
         lastActiveAt: lastActiveAt.value,
+        ...assetBindingState.persistedAssetBinding(),
       }
       await $services.preferenceService.set(
         'session/v1/basic-user',
         sessionState
       )
     } catch (error) {
-      console.error('[BasicUserSession] 保存会话失败:', error)
+      console.error('[BasicUserSession] Failed to save session:', error)
     }
   }
 
@@ -438,7 +481,7 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
   const restoreSession = async () => {
     const $services = getPiniaServices()
     if (!$services?.preferenceService) {
-      console.warn('[BasicUserSession] PreferenceService 不可用，无法恢复会话')
+      console.warn('[BasicUserSession] PreferenceService is unavailable; cannot restore session')
       return
     }
 
@@ -459,19 +502,15 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
         chainId.value = parsed.chainId
         versionId.value = parsed.versionId
         testContent.value = parsed.testContent
-        testResults.value = parsed.testResults
 
-        // 兼容旧数据：layout/testVariants 缺失时使用默认值
         const defaultState = createDefaultState()
         const coerceVersionValue = (value: unknown): TestPanelVersionValue | null => {
-          if (value === 'latest') return 'latest'
-          if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.floor(value)
-          return null
+          const normalizedValue = coerceTestPanelVersionValue(value)
+          return normalizedValue == null ? null : normalizedValue
         }
 
         const legacyModelKey = typeof parsed.selectedTestModelKey === 'string' ? parsed.selectedTestModelKey : ''
 
-        // variant results (v2): 优先从 saved 读取；否则从旧 testResults 迁移 a/b
         const savedVariantResults = (parsed as Partial<BasicUserSessionState>).testVariantResults
         const savedFingerprint = (parsed as Partial<BasicUserSessionState>).testVariantLastRunFingerprint
         const nextVariantResults: TestVariantResults = { ...defaultState.testVariantResults }
@@ -492,12 +531,6 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
             const vr = coerceVariantResult(obj[id])
             if (vr) nextVariantResults[id] = vr
           }
-        } else if (parsed.testResults) {
-          // legacy: 仅 a/b
-          if (typeof parsed.testResults.originalResult === 'string') nextVariantResults.a.result = parsed.testResults.originalResult
-          if (typeof parsed.testResults.originalReasoning === 'string') nextVariantResults.a.reasoning = parsed.testResults.originalReasoning
-          if (typeof parsed.testResults.optimizedResult === 'string') nextVariantResults.b.result = parsed.testResults.optimizedResult
-          if (typeof parsed.testResults.optimizedReasoning === 'string') nextVariantResults.b.reasoning = parsed.testResults.optimizedReasoning
         }
 
         if (savedFingerprint && typeof savedFingerprint === 'object') {
@@ -510,7 +543,6 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
         testVariantResults.value = nextVariantResults
         testVariantLastRunFingerprint.value = nextFingerprint
 
-        // layout
         const savedLayout = (parsed as Partial<BasicUserSessionState>).layout
         const savedLeftRaw = savedLayout && typeof savedLayout.mainSplitLeftPct === 'number'
           ? savedLayout.mainSplitLeftPct
@@ -524,7 +556,6 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
           testColumnCount: savedCols,
         }
 
-        // variants
         const fromSavedVariants = (parsed as Partial<BasicUserSessionState>).testVariants
         if (Array.isArray(fromSavedVariants) && fromSavedVariants.length) {
           const normalized: TestVariantConfig[] = defaultState.testVariants.map((d) => {
@@ -537,40 +568,31 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
           })
           testVariants.value = normalized
         } else {
-          // v1 迁移：从旧 testPanels 迁移到 a/b
-          type LegacyPanel = { version?: unknown; modelKey?: unknown }
-          type LegacyPanels = { original?: LegacyPanel; optimized?: LegacyPanel }
-          const legacyPanels = (parsed as { testPanels?: LegacyPanels }).testPanels
-          const originalSaved = legacyPanels?.original
-          const optimizedSaved = legacyPanels?.optimized
-
-          testVariants.value = [
-            {
-              id: 'a',
-              version: coerceVersionValue(originalSaved?.version) ?? 0,
-              modelKey: typeof originalSaved?.modelKey === 'string' ? originalSaved.modelKey : legacyModelKey,
-            },
-            {
-              id: 'b',
-              version: coerceVersionValue(optimizedSaved?.version) ?? 'latest',
-              modelKey: typeof optimizedSaved?.modelKey === 'string' ? optimizedSaved.modelKey : legacyModelKey,
-            },
-            { id: 'c', version: 'latest', modelKey: legacyModelKey },
-            { id: 'd', version: 'latest', modelKey: legacyModelKey },
-          ]
+          testVariants.value = defaultState.testVariants.map((variant) => ({
+            ...variant,
+            modelKey: legacyModelKey,
+          }))
         }
-        // 兼容旧数据：未保存 evaluationResults 时使用默认值
         evaluationResults.value = {
           ...createDefaultEvaluationResults(),
           ...(parsed.evaluationResults && typeof parsed.evaluationResults === 'object'
             ? (parsed.evaluationResults as PersistedEvaluationResults)
             : {}),
         }
+        compareSnapshotRoles.value = sanitizeCompareSnapshotRoles(
+          (parsed as Partial<BasicUserSessionState>).compareSnapshotRoles,
+          ids
+        )
+        compareSnapshotRoleSignatures.value = sanitizeCompareSnapshotRoleSignatures(
+          (parsed as Partial<BasicUserSessionState>).compareSnapshotRoleSignatures,
+          ids
+        )
         selectedOptimizeModelKey.value = parsed.selectedOptimizeModelKey
         selectedTestModelKey.value = parsed.selectedTestModelKey
         selectedTemplateId.value = parsed.selectedTemplateId
         selectedIterateTemplateId.value = parsed.selectedIterateTemplateId
         isCompareMode.value = parsed.isCompareMode
+        assetBindingState.restoreAssetBinding(parsed)
         lastActiveAt.value = Date.now()
       }
 
@@ -594,7 +616,7 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
         }
       }
     } catch (error) {
-      console.error('[BasicUserSession] 恢复会话失败:', error)
+      console.error('[BasicUserSession] Failed to restore session:', error)
       // 恢复失败时保持当前状态或重置为默认
       reset()
     }
@@ -608,32 +630,39 @@ export const useBasicUserSession = defineStore('basicUserSession', () => {
     chainId,
     versionId,
     testContent,
-    testResults,
     layout,
     testVariants,
     testVariantResults,
     testVariantLastRunFingerprint,
     evaluationResults,
+    compareSnapshotRoles,
+    compareSnapshotRoleSignatures,
     selectedOptimizeModelKey,
     selectedTestModelKey,
     selectedTemplateId,
     selectedIterateTemplateId,
     isCompareMode,
     lastActiveAt,
+    assetBinding: assetBindingState.assetBinding,
+    origin: assetBindingState.origin,
 
     // ========== 更新方法 ==========
     updatePrompt,
     updateOptimizedResult,
     updateTestContent,
-    updateTestResults,
     setTestColumnCount,
     setMainSplitLeftPct,
+    resetTestVariantState,
+    clearContent,
+    updateAssetBinding: assetBindingState.updateAssetBinding,
+    clearAssetBinding: assetBindingState.clearAssetBinding,
     updateTestVariant,
     updateOptimizeModel,
     updateTestModel,
     updateTemplate,
     updateIterateTemplate,
     toggleCompareMode,
+    updateCompareSnapshotRoles,
     reset,
 
     // ========== 持久化方法 ==========

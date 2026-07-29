@@ -4,7 +4,7 @@
  * 使用 LLM 根据提示词上下文智能推测变量值
  */
 
-import type { Template, MessageTemplate } from '../../../types';
+import type { Template, MessageTemplate } from '../../types';
 
 export const template: Template = {
   id: 'variable-value-generation',
@@ -61,7 +61,11 @@ export const template: Template = {
 # 重要规则
 
 - 必须为列表中的每个变量都生成值
+- 变量描述和默认值如果出现，必须作为主要参考
+- 如果变量提供了默认值且语义合适，优先使用或贴近默认值
 - 如果变量已有当前值,可参考但不必照搬
+- 如果提供了“已填写变量上下文”,必须将其作为场景约束来推测空缺变量
+- 只为“需要生成值的变量列表”输出 values,不要为“已填写变量上下文”输出 values
 - 生成的值应该是具体的、可直接使用的字符串
 - 如果某个变量难以推测,提供一个通用的占位值,并在reason中说明
 - 只输出 JSON,不添加额外解释`
@@ -73,6 +77,14 @@ export const template: Template = {
 \`\`\`
 {{promptContent}}
 \`\`\`
+
+{{#hasContextVariables}}
+## 已填写变量上下文（只作为参考，不要重新生成或输出）
+
+{{contextVariablesText}}
+
+共 {{contextVariableCount}} 个已填写变量。
+{{/hasContextVariables}}
 
 ## 需要生成值的变量列表
 

@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  BASIC_SYSTEM_SESSION_KEY,
   FAVORITES_STORAGE_KEY,
   IMAGE_IMAGE2IMAGE_SESSION_KEY,
+  IMAGE_MULTIIMAGE_SESSION_KEY,
   IMAGE_TEXT2IMAGE_SESSION_KEY,
   scheduleImageStorageGc,
 } from '../../../../src/stores/session/imageStorageMaintenance'
@@ -142,5 +144,69 @@ describe('imageStorageMaintenance GC', () => {
 
     expect(imageStorageService.deleteImages).toHaveBeenCalledTimes(1)
     expect(imageStorageService.deleteImages).toHaveBeenCalledWith(['img-orphan-3'])
+  })
+
+  it('keeps multiimage input asset ids referenced by the multiimage session snapshot', async () => {
+    const preferenceService = {
+      get: vi.fn(async (key: string, defaultValue: unknown) => {
+        if (key === IMAGE_TEXT2IMAGE_SESSION_KEY || key === IMAGE_IMAGE2IMAGE_SESSION_KEY || key === FAVORITES_STORAGE_KEY) {
+          return null
+        }
+
+        if (key === IMAGE_MULTIIMAGE_SESSION_KEY) {
+          return {
+            inputImages: [
+              { id: 'img-1', assetId: 'img-multi-1', mimeType: 'image/png' },
+              { id: 'img-2', assetId: 'img-multi-2', mimeType: 'image/jpeg' },
+            ],
+          }
+        }
+
+        return defaultValue
+      }),
+    }
+
+    const imageStorageService = {
+      listAllMetadata: vi.fn(async () => [
+        { id: 'img-multi-1' },
+        { id: 'img-multi-2' },
+        { id: 'img-orphan-multi' },
+      ]),
+      deleteImages: vi.fn(async (_ids: string[]) => {}),
+    }
+
+    scheduleImageStorageGc(preferenceService as any, imageStorageService as any, { delayMs: 0 })
+    await flushScheduledGc()
+
+    expect(imageStorageService.deleteImages).toHaveBeenCalledTimes(1)
+    expect(imageStorageService.deleteImages).toHaveBeenCalledWith(['img-orphan-multi'])
+  })
+
+  it('keeps the Basic/System test image asset referenced by its session snapshot', async () => {
+    const preferenceService = {
+      get: vi.fn(async (key: string, defaultValue: unknown) => {
+        if (key === BASIC_SYSTEM_SESSION_KEY) {
+          return JSON.stringify({
+            testImageAssetId: 'img-basic-test',
+            testImageMimeType: 'image/png',
+          })
+        }
+
+        return defaultValue
+      }),
+    }
+    const imageStorageService = {
+      listAllMetadata: vi.fn(async () => [
+        { id: 'img-basic-test' },
+        { id: 'img-orphan-basic' },
+      ]),
+      deleteImages: vi.fn(async (_ids: string[]) => {}),
+    }
+
+    scheduleImageStorageGc(preferenceService as any, imageStorageService as any, { delayMs: 0 })
+    await flushScheduledGc()
+
+    expect(imageStorageService.deleteImages).toHaveBeenCalledTimes(1)
+    expect(imageStorageService.deleteImages).toHaveBeenCalledWith(['img-orphan-basic'])
   })
 })

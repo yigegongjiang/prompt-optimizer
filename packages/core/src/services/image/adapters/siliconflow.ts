@@ -19,10 +19,11 @@ export class SiliconFlowImageAdapter extends AbstractImageProviderAdapter {
     return {
       id: 'siliconflow',
       name: 'SiliconFlow',
-      description: 'SiliconFlow 多模型图像生成平台',
+      description: 'SiliconFlow multi-model image generation platform',
       requiresApiKey: true,
       defaultBaseURL: 'https://api.siliconflow.cn/v1',
       supportsDynamicModels: false,
+      apiKeyUrl: 'https://cloud.siliconflow.cn/account/ak',
       connectionSchema: {
         required: ['apiKey'],
         optional: ['baseURL'],
@@ -40,7 +41,7 @@ export class SiliconFlowImageAdapter extends AbstractImageProviderAdapter {
       {
         id: 'Kwai-Kolors/Kolors',
         name: 'Kolors',
-        description: 'Kwai-Kolors 高质量图像生成模型',
+        description: 'Kwai-Kolors high-quality image generation model',
         providerId: 'siliconflow',
         capabilities: {
           text2image: true,
@@ -99,7 +100,7 @@ export class SiliconFlowImageAdapter extends AbstractImageProviderAdapter {
       {
         id: 'Qwen/Qwen-Image',
         name: 'Qwen Image',
-        description: 'Qwen 多模态图像生成模型，支持文本生成和CFG控制',
+        description: 'Qwen multimodal image generation model with text rendering and CFG control support',
         providerId: 'siliconflow',
         capabilities: {
           text2image: true,

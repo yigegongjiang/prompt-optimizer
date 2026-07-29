@@ -2,14 +2,17 @@ import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
 import path from 'path'
+import { DEFAULT_VITE_ENV } from '../core/src/utils/default-env'
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
-  // 在 monorepo 中，脚本可能从不同的 cwd 启动；不要依赖 process.cwd() 去定位 .env。
-  // 这里用配置文件所在位置推导出 monorepo root，并让 Vite 将 VITE_* 注入 import.meta.env。
   const monorepoRoot = resolve(__dirname, '../..')
   const env = loadEnv(mode, monorepoRoot)
-  
+  const processEnv = {
+    ...DEFAULT_VITE_ENV,
+    ...env,
+  }
+
   return {
     envDir: monorepoRoot,
     plugins: [vue()],
@@ -44,17 +47,13 @@ export default defineConfig(({ mode }) => {
         '@prompt-optimizer/extension': path.resolve(__dirname, '../extension')
       }
     },
-    optimizeDeps: {
-      // 预构建依赖
-      include: ['element-plus'],
-    },
     define: {
       'process.env': {
         NODE_ENV: JSON.stringify(process.env.NODE_ENV || 'development'),
-        ...Object.keys(env).reduce((acc, key) => {
-          acc[key] = env[key];
-          return acc;
-        }, {})
+        ...Object.keys(processEnv).reduce((acc, key) => {
+          acc[key] = processEnv[key as keyof typeof processEnv]
+          return acc
+        }, {} as Record<string, string>)
       }
     }
   }

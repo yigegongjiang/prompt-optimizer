@@ -1,5 +1,13 @@
 <template>
     <div class="image-text2image-workspace" data-testid="workspace" data-mode="image-text2image">
+        <div class="workspace-page-tools">
+            <WorkspaceUtilityMenu
+                :disabled="isOptimizing || isIterating || isAnyVariantRunning || isExtractingFromImage"
+                :source="resolveSourceAssetRef(session.origin, session.assetBinding)"
+                test-id="image-text2image-workspace-utility-menu"
+                @clear="handleClearContent"
+            />
+        </div>
         <div
             ref="splitRootRef"
             class="image-text2image-split"
@@ -13,7 +21,12 @@
                     size="medium"
                 >
             <!-- 输入控制区域 - 对齐InputPanel布局 -->
-            <NCard :style="{ flexShrink: 0 }">
+            <TestSourceLinkedCard
+                :style="{ flexShrink: 0 }"
+                :feedback-key="sourceAreaFeedback.original.key"
+                :feedback-tone="sourceAreaFeedback.original.tone"
+                :source-tone="sourceAreaFeedback.original.sourceTone"
+            >
                 <!-- 折叠态：只显示标题栏 -->
                 <NFlex
                     v-if="isInputPanelCollapsed"
@@ -32,22 +45,95 @@
                             {{ promptSummary }}
                         </NText>
                     </NFlex>
-                    <NButton
-                        type="tertiary"
-                        size="small"
-                        ghost
-                        round
-                        @click="isInputPanelCollapsed = false"
-                        :title="t('common.expand')"
-                    >
-                        <template #icon>
-                            <NIcon>
-                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
-                                </svg>
-                            </NIcon>
-                        </template>
-                    </NButton>
+                    <NFlex align="center" :size="8">
+                        <PromptGardenInspirationPopover
+                            mode="image-text2image"
+                            :has-prompt="!!originalPrompt.trim()"
+                            :disabled="isPromptGardenGuideDisabled"
+                            test-id="image-text2image-prompt-garden-inspiration"
+                            @apply="handlePromptGardenImportConfirm"
+                            @open-import="showPromptGardenImport = true"
+                        />
+                        <NFlex align="center" :size="6" class="reference-action-toolbar">
+                            <NTooltip
+                                v-for="button in referenceActionButtons"
+                                :key="button.kind"
+                                trigger="hover"
+                                :overlay-style="referenceActionTooltipOverlayStyle"
+                                :content-style="referenceActionTooltipContentStyle"
+                                :theme-overrides="referenceActionTooltipThemeOverrides"
+                                to="body"
+                                :flip="true"
+                            >
+                                <template #trigger>
+                                    <span class="reference-action-button-wrap">
+                                        <NButton
+                                            type="tertiary"
+                                            size="small"
+                                            ghost
+                                            class="header-utility-button"
+                                            :data-testid="`reference-action-${button.kind}-button`"
+                                            :loading="button.loading"
+                                            :disabled="button.disabled"
+                                            @click="triggerReferenceAction(button.kind)"
+                                        >
+                                            <template #icon>
+                                                <NIcon>
+                                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 7.5h3l1.2-1.8A1.5 1.5 0 0110 5h4a1.5 1.5 0 011.3.7l1.2 1.8h3A1.5 1.5 0 0121 9v8.5A1.5 1.5 0 0119.5 19h-15A1.5 1.5 0 013 17.5V9a1.5 1.5 0 011.5-1.5Z" />
+                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.5a3 3 0 106 0 3 3 0 00-6 0Z" />
+                                                    </svg>
+                                                </NIcon>
+                                            </template>
+                                            {{ t(button.labelKey) }}
+                                        </NButton>
+                                    </span>
+                                </template>
+                                {{ t(button.tooltipKey) }}
+                            </NTooltip>
+
+                            <div
+                                v-if="referenceAction.hasSourceImage || referenceAction.status !== 'idle'"
+                                class="reference-action-anchor"
+                            >
+                                <AppPreviewImage
+                                    v-if="referenceAction.sourceImagePreviewUrl"
+                                    class="reference-action-thumbnail"
+                                    :src="referenceAction.sourceImagePreviewUrl"
+                                    :alt="t('imageWorkspace.referenceImage.thumbnailAlt')"
+                                    width="40"
+                                    height="40"
+                                    object-fit="cover"
+                                />
+
+                                <NTag
+                                    v-if="referenceActionStatusLabelKey"
+                                    size="small"
+                                    :bordered="false"
+                                    :type="referenceAction.status === 'error' ? 'error' : 'default'"
+                                    class="reference-action-status"
+                                >
+                                    {{ t(referenceActionStatusLabelKey) }}
+                                </NTag>
+                            </div>
+                        </NFlex>
+                        <NButton
+                            type="tertiary"
+                            size="small"
+                            ghost
+                            round
+                            @click="isInputPanelCollapsed = false"
+                            :title="t('common.expand')"
+                        >
+                            <template #icon>
+                                <NIcon>
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+                                    </svg>
+                                </NIcon>
+                            </template>
+                        </NButton>
+                    </NFlex>
                 </NFlex>
 
                 <!-- 展开态：完整输入面板 -->
@@ -61,7 +147,92 @@
                                 t("imageWorkspace.input.originalPrompt")
                             }}</NText
                         >
-                        <NFlex align="center" :size="12">
+                        <NFlex align="center" :size="8">
+                            <PromptGardenInspirationPopover
+                                mode="image-text2image"
+                                :has-prompt="!!originalPrompt.trim()"
+                                :disabled="isPromptGardenGuideDisabled"
+                                test-id="image-text2image-prompt-garden-inspiration"
+                                @apply="handlePromptGardenImportConfirm"
+                                @open-import="showPromptGardenImport = true"
+                            />
+                            <NFlex align="center" :size="6" class="reference-action-toolbar">
+                                <NTooltip
+                                    v-for="button in referenceActionButtons"
+                                    :key="button.kind"
+                                    trigger="hover"
+                                    :overlay-style="referenceActionTooltipOverlayStyle"
+                                    :content-style="referenceActionTooltipContentStyle"
+                                    :theme-overrides="referenceActionTooltipThemeOverrides"
+                                    to="body"
+                                    :flip="true"
+                                >
+                                    <template #trigger>
+                                        <span class="reference-action-button-wrap">
+                                            <NButton
+                                                type="tertiary"
+                                                size="small"
+                                                ghost
+                                                class="header-utility-button"
+                                                :data-testid="`reference-action-${button.kind}-button`"
+                                                :loading="button.loading"
+                                                :disabled="button.disabled"
+                                                @click="triggerReferenceAction(button.kind)"
+                                            >
+                                                <template #icon>
+                                                    <NIcon>
+                                                        <svg
+                                                            xmlns="http://www.w3.org/2000/svg"
+                                                            fill="none"
+                                                            viewBox="0 0 24 24"
+                                                            stroke="currentColor"
+                                                            stroke-width="1.8"
+                                                        >
+                                                            <path
+                                                                stroke-linecap="round"
+                                                                stroke-linejoin="round"
+                                                                d="M4.5 7.5h3l1.2-1.8A1.5 1.5 0 0110 5h4a1.5 1.5 0 011.3.7l1.2 1.8h3A1.5 1.5 0 0121 9v8.5A1.5 1.5 0 0119.5 19h-15A1.5 1.5 0 013 17.5V9a1.5 1.5 0 011.5-1.5Z"
+                                                            />
+                                                            <path
+                                                                stroke-linecap="round"
+                                                                stroke-linejoin="round"
+                                                                d="M9 12.5a3 3 0 106 0 3 3 0 00-6 0Z"
+                                                            />
+                                                        </svg>
+                                                    </NIcon>
+                                                </template>
+                                                {{ t(button.labelKey) }}
+                                            </NButton>
+                                        </span>
+                                    </template>
+                                    {{ t(button.tooltipKey) }}
+                                </NTooltip>
+
+                                <div
+                                    v-if="referenceAction.hasSourceImage || referenceAction.status !== 'idle'"
+                                    class="reference-action-anchor"
+                                >
+                                    <AppPreviewImage
+                                        v-if="referenceAction.sourceImagePreviewUrl"
+                                        class="reference-action-thumbnail"
+                                        :src="referenceAction.sourceImagePreviewUrl"
+                                        :alt="t('imageWorkspace.referenceImage.thumbnailAlt')"
+                                        width="40"
+                                        height="40"
+                                        object-fit="cover"
+                                    />
+
+                                    <NTag
+                                        v-if="referenceActionStatusLabelKey"
+                                        size="small"
+                                        :bordered="false"
+                                        :type="referenceAction.status === 'error' ? 'error' : 'default'"
+                                        class="reference-action-status"
+                                    >
+                                        {{ t(referenceActionStatusLabelKey) }}
+                                    </NTag>
+                                </div>
+                            </NFlex>
                             <NButton
                                 type="tertiary"
                                 size="small"
@@ -116,7 +287,7 @@
                         @update:model-value="handleOriginalPromptInput"
                         :readonly="isOptimizing"
                         :placeholder="t('imageWorkspace.input.originalPromptPlaceholder')"
-                        :autosize="true"
+                        :autosize="{ minRows: 4, maxRows: 12 }"
                         v-bind="variableInputData"
                         clearable
                         show-count
@@ -143,15 +314,24 @@
                         <!-- 文本模型选择 -->
                         <NGridItem :span="7" :xs="24" :sm="7">
                             <NSpace vertical :size="8">
-                                <NText
-                                    :depth="2"
-                                    style="font-size: 14px; font-weight: 500"
-                                    >{{
-                                        t("imageWorkspace.input.textModel")
-                                    }}</NText
-                                >
+                                <NFlex align="center" :size="6" :wrap="false">
+                                    <NText
+                                        :depth="2"
+                                        style="font-size: 14px; font-weight: 500; flex-shrink: 0;"
+                                        >{{
+                                            t("imageWorkspace.input.textModel")
+                                        }}</NText
+                                    >
+                                    <TextModelQuickSwitch
+                                        :model-key="selectedTextModelKey"
+                                        :options="textModelOptions"
+                                        :refresh-models="modelSelection.refreshTextModels"
+                                        :disabled="isOptimizing"
+                                    />
+                                </NFlex>
                                 <template v-if="appOpenModelManager">
                                     <SelectWithConfig
+                                        data-testid="image-text2image-text-model-select"
                                         v-model="selectedTextModelKey"
                                         :options="textModelOptions"
                                         :getPrimary="OptionAccessors.getPrimary"
@@ -179,6 +359,7 @@
                                 </template>
                                 <template v-else>
                                     <SelectWithConfig
+                                        data-testid="image-text2image-text-model-select"
                                         v-model="selectedTextModelKey"
                                         :options="textModelOptions"
                                         :getPrimary="OptionAccessors.getPrimary"
@@ -252,29 +433,28 @@
                             </NSpace>
                         </NGridItem>
 
-                        <!-- 分析与优化按钮 -->
+                        <!-- 优化按钮 -->
                         <NGridItem :span="6" :xs="24" :sm="6" class="flex items-end justify-end">
                             <NSpace :size="8">
-                                <!-- 分析按钮（与优化同级） -->
                                 <NButton
                                     type="default"
                                     size="medium"
                                     data-testid="image-text2image-analyze-button"
                                     :loading="isAnalyzing"
-                                    @click="handleAnalyze"
+                                    @click="handleAnalyzePrompt"
                                     :disabled="
                                         isAnalyzing ||
+                                        isExtractingFromImage ||
                                         isOptimizing ||
                                         !originalPrompt.trim()
                                     "
                                 >
                                     {{
                                         isAnalyzing
-                                            ? t('promptOptimizer.analyzing')
-                                            : t('promptOptimizer.analyze')
+                                            ? t("promptOptimizer.analyzing")
+                                            : t("promptOptimizer.analyze")
                                     }}
                                 </NButton>
-                                <!-- 优化按钮 -->
                                 <NButton
                                     type="primary"
                                     size="medium"
@@ -283,6 +463,7 @@
                                     @click="handleOptimizePrompt"
                                     :disabled="
                                         isAnalyzing ||
+                                        isExtractingFromImage ||
                                         isOptimizing ||
                                         !originalPrompt.trim() ||
                                         !selectedTextModelKey ||
@@ -299,12 +480,23 @@
                         </NGridItem>
                     </NGrid>
                 </NSpace>
-            </NCard>
+            </TestSourceLinkedCard>
+
+            <input
+                ref="extractImageInputRef"
+                type="file"
+                accept="image/png,image/jpeg"
+                style="display: none"
+                @change="handleReferenceImageFileChange"
+            />
 
             <!-- 优化结果区域 - 使用与基础模式一致的卡片容器 -->
-            <NCard
+            <TestSourceLinkedCard
                 :style="{ flex: 1, minHeight: '200px', overflow: 'hidden' }"
                 content-style="height: 100%; max-height: 100%; overflow: hidden;"
+                :feedback-key="sourceAreaFeedback.workspace.key"
+                :feedback-tone="sourceAreaFeedback.workspace.tone"
+                :source-tone="sourceAreaFeedback.workspace.sourceTone"
             >
                 <PromptPanelUI
                     v-if="services && services.templateManager"
@@ -318,18 +510,24 @@
                     v-model:selected-iterate-template="selectedIterateTemplate"
                     :versions="currentVersions"
                     :current-version-id="currentVersionId"
+                    :source-feedback-key="sourceAreaFeedback.workspace.key"
+                    :source-feedback-tone="sourceAreaFeedback.workspace.tone"
+                    :source-feedback-version="sourceAreaFeedback.workspace.resolvedVersion"
                     :optimization-mode="optimizationMode"
                     :advanced-mode-enabled="advancedModeEnabled"
                     :show-preview="true"
+                    evaluation-type-override="prompt-only"
                     iterate-template-type="imageIterate"
                     @iterate="handleIteratePrompt"
                     @openTemplateManager="onOpenTemplateManager"
                     @switchVersion="handleSwitchVersion"
                     @save-favorite="handleSaveFavorite"
                     @save-local-edit="handleSaveLocalEdit"
+                    @apply-improvement="handleApplyImprovement"
+                    @apply-patch="handleApplyPatch"
                     @open-preview="handleOpenPromptPreview"
                 />
-            </NCard>
+            </TestSourceLinkedCard>
                 </NFlex>
             </div>
 
@@ -383,6 +581,42 @@
                                 >
                                     {{ t('test.layout.runAll') }}
                                 </NButton>
+
+                                <template v-if="shouldShowCompareEvaluationAction">
+                                    <EvaluationScoreBadge
+                                        v-if="hasCompareEvaluation || isEvaluatingCompare"
+                                        :score="compareScore"
+                                        :level="compareScoreLevel"
+                                        :loading="isEvaluatingCompare"
+                                        :result="compareEvaluationResult"
+                                        type="compare"
+                                        :stale="isCompareEvaluationStale"
+                                        :stale-message="t('evaluation.stale.compare')"
+                                        :disable-evaluate="!canEvaluateCompare"
+                                        :disable-evaluate-reason="compareDisabledReason"
+                                        size="small"
+                                        @show-detail="showCompareDetail"
+                                        @evaluate="handleEvaluateCompare"
+                                        @evaluate-with-feedback="handleCompareEvaluateWithFeedback"
+                                        @apply-improvement="handleApplyImprovement"
+                                        @apply-patch="handleApplyPatch"
+                                    />
+                                    <FocusAnalyzeButton
+                                        v-else
+                                        type="compare"
+                                        :label="t('evaluation.compareEvaluate')"
+                                        :disabled="!canEvaluateCompare"
+                                        :disabled-reason="compareDisabledReason"
+                                        :loading="isEvaluatingCompare"
+                                        :button-props="{ size: 'small', type: 'tertiary' }"
+                                        @evaluate="handleEvaluateCompare"
+                                        @evaluate-with-feedback="handleCompareEvaluateWithFeedback"
+                                    >
+                                        <template #icon>
+                                            <AnalyzeActionIcon />
+                                        </template>
+                                    </FocusAnalyzeButton>
+                                </template>
                             </NFlex>
                         </div>
                     </NCard>
@@ -391,70 +625,78 @@
                     <NCard size="small" :style="{ flexShrink: 0 }">
                         <div class="variant-deck" :style="{ gridTemplateColumns: testGridTemplateColumns }">
                             <div v-for="id in activeVariantIds" :key="id" class="variant-cell">
-                                <div class="variant-cell__controls">
-                                    <NTag size="small" :bordered="false" class="variant-cell__label">
-                                        {{ getVariantLabel(id) }}
-                                    </NTag>
-                                    <NTag
-                                        v-if="isVariantStale(id)"
-                                        size="small"
-                                        type="warning"
-                                        :bordered="false"
-                                        class="variant-cell__stale"
-                                    >
-                                        {{ t('test.layout.stale') }}
-                                    </NTag>
-
-                                    <NSelect
-                                        :value="variantVersionModels[id].value"
-                                        :options="versionOptions"
-                                        size="small"
-                                        :disabled="variantRunning[id]"
-                                        :data-testid="getVariantVersionTestId(id)"
-                                        @update:value="(value) => { variantVersionModels[id].value = value }"
-                                        style="width: 92px"
-                                    />
-
-                                    <div class="variant-cell__model">
-                                        <SelectWithConfig
-                                            :data-testid="getVariantModelTestId(id)"
-                                            :model-value="variantModelKeyModels[id].value"
-                                            @update:model-value="(value) => { variantModelKeyModels[id].value = String(value ?? '') }"
+                                <div
+                                    class="variant-cell__controls"
+                                    :class="{ 'variant-cell__controls--stacked': useStackedVariantControls }"
+                                >
+                                    <div class="variant-cell__meta">
+                                        <TestVariantSourceTag
+                                            class="variant-cell__label"
+                                            :variant-label="getVariantLabel(id)"
+                                            :selection="variantVersionModels[id].value"
+                                            :resolved-version="getVariantResolvedVersion(id)"
+                                            :labels="getTestPanelVersionLabels()"
+                                            :feedback-key="variantSourceFeedback[id].key"
+                                            :feedback-tone="variantSourceFeedback[id].tone"
+                                            @activate="activateVariantSource(id)"
+                                        />
+                                        <ImageModelQuickSwitch
+                                            :model-key="variantModelKeyModels[id].value"
                                             :options="imageModelOptions"
-                                            :getPrimary="OptionAccessors.getPrimary"
-                                            :getSecondary="OptionAccessors.getSecondary"
-                                            :getValue="OptionAccessors.getValue"
-                                            :placeholder="t('imageWorkspace.generation.imageModelPlaceholder')"
-                                            size="small"
+                                            :refresh-models="refreshImageModels"
                                             :disabled="variantRunning[id]"
-                                            filterable
-                                            :show-config-action="!!appOpenModelManager"
-                                            :show-empty-config-c-t-a="true"
-                                            @config="() => appOpenModelManager && appOpenModelManager('image')"
-                                            style="min-width: 0; width: 100%;"
                                         />
                                     </div>
 
-                                    <NTooltip trigger="hover">
-                                        <template #trigger>
-                                                 <NButton
-                                                     type="primary"
-                                                     size="small"
-                                                     circle
-                                                     :loading="variantRunning[id]"
-                                                     :disabled="variantRunning[id]"
-                                                     @click="() => runVariant(id)"
-                                                     :data-testid="getVariantRunTestId(id)"
-                                                 >
-                                                <template #icon>
-                                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-                                                        <path d="M8 5v14l11-7z" />
-                                                    </svg>
-                                                </template>
-                                            </NButton>
-                                        </template>
-                                        {{ t('test.layout.runThisColumn') }}
-                                    </NTooltip>
+                                    <div class="variant-cell__actions">
+                                        <TestPanelVersionSelect
+                                            :value="variantVersionModels[id].value"
+                                            :options="versionOptions"
+                                            :disabled="variantRunning[id]"
+                                            :test-id="getVariantVersionTestId(id)"
+                                            @update:value="(value) => handleVariantVersionChange(id, value)"
+                                        />
+
+                                        <div class="variant-cell__model">
+                                            <SelectWithConfig
+                                                :data-testid="getVariantModelTestId(id)"
+                                                :model-value="variantModelKeyModels[id].value"
+                                                @update:model-value="(value) => { variantModelKeyModels[id].value = String(value ?? '') }"
+                                                :options="imageModelOptions"
+                                                :getPrimary="OptionAccessors.getPrimary"
+                                                :getSecondary="OptionAccessors.getSecondary"
+                                                :getValue="OptionAccessors.getValue"
+                                                :placeholder="t('imageWorkspace.generation.imageModelPlaceholder')"
+                                                size="small"
+                                                :disabled="variantRunning[id]"
+                                                filterable
+                                                :show-config-action="!!appOpenModelManager"
+                                                :show-empty-config-c-t-a="true"
+                                                @config="() => appOpenModelManager && appOpenModelManager('image')"
+                                                style="min-width: 0; width: 100%;"
+                                            />
+                                        </div>
+
+                                        <div class="variant-cell__run">
+                                            <ThemedTooltip :label="t('test.layout.runThisColumn')">
+                                                <NButton
+                                                    type="primary"
+                                                    size="small"
+                                                    circle
+                                                    :loading="variantRunning[id]"
+                                                    :disabled="variantRunning[id]"
+                                                    @click="() => runVariant(id)"
+                                                    :data-testid="getVariantRunTestId(id)"
+                                                >
+                                                    <template #icon>
+                                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                                                            <path d="M8 5v14l11-7z" />
+                                                        </svg>
+                                                    </template>
+                                                </NButton>
+                                            </ThemedTooltip>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -474,7 +716,56 @@
                                     <div class="result-body">
                                         <template v-if="hasVariantResult(id)">
                                             <NSpace vertical :size="12" style="padding: 12px;">
-                                                <NImage
+                                                <NFlex justify="end" align="center">
+                                                    <SaveTestResultExampleButton
+                                                        sub-mode-key="image-text2image"
+                                                        :variant-id="id"
+                                                        :content="optimizedPrompt || originalPrompt"
+                                                        :original-content="originalPrompt"
+                                                        function-mode="image"
+                                                        image-sub-mode="text2image"
+                                                        :disabled="variantRunning[id]"
+                                                        :test-id="`save-test-example-image-text2image-${id}`"
+                                                    />
+                                                    <div
+                                                        v-if="shouldShowResultEvaluationAction(id)"
+                                                        class="output-evaluation-entry"
+                                                    >
+                                                        <EvaluationScoreBadge
+                                                            v-if="getResultEvaluationProps(id).hasEvaluation || getResultEvaluationProps(id).isEvaluating"
+                                                            :score="getResultEvaluationProps(id).score"
+                                                            :level="getResultEvaluationProps(id).scoreLevel"
+                                                            :loading="getResultEvaluationProps(id).isEvaluating"
+                                                            :result="getResultEvaluationProps(id).evaluationResult"
+                                                            type="result"
+                                                            :stale="isResultEvaluationStale(id)"
+                                                            :stale-message="t('evaluation.stale.result')"
+                                                            :disable-evaluate="!canEvaluateResult(id)"
+                                                            size="small"
+                                                            @show-detail="() => showResultDetail(id)"
+                                                            @evaluate="() => handleEvaluateResult(id)"
+                                                            @evaluate-with-feedback="handleResultEvaluateWithFeedbackEvent(id, $event)"
+                                                            @apply-improvement="handleApplyImprovement"
+                                                            @apply-patch="handleApplyPatch"
+                                                        />
+                                                        <FocusAnalyzeButton
+                                                            v-else
+                                                            type="result"
+                                                            variant="toolbar"
+                                                            :label="t('evaluation.evaluate')"
+                                                            :disabled="!canEvaluateResult(id)"
+                                                            :loading="getResultEvaluationProps(id).isEvaluating"
+                                                            :button-props="{ size: 'small', quaternary: true, circle: true }"
+                                                            @evaluate="() => handleEvaluateResult(id)"
+                                                            @evaluate-with-feedback="handleResultEvaluateWithFeedbackEvent(id, $event)"
+                                                        >
+                                                            <template #icon>
+                                                                <AnalyzeActionIcon />
+                                                            </template>
+                                                        </FocusAnalyzeButton>
+                                                    </div>
+                                                </NFlex>
+                                                <AppPreviewImage
                                                     :data-testid="getVariantImageTestId(id)"
                                                     :src="getImageSrc(getVariantResult(id)?.images?.[0])"
                                                     object-fit="contain"
@@ -501,10 +792,12 @@
                                                     </NCard>
                                                 </template>
 
+                                                <ImageTokenUsage :metadata="getVariantResult(id)?.metadata" :image="getVariantResult(id)?.images?.[0]" />
+
                                                 <NSpace justify="center" :size="8">
                                                     <NButton
                                                         size="small"
-                                                        @click="downloadImageFromResult(getVariantResult(id)?.images?.[0], `variant-${id}`)"
+                                                        @click="downloadImageFromResult(getVariantResult(id)?.images?.[0])"
                                                     >
                                                         <template #icon>
                                                             <NIcon>
@@ -562,6 +855,29 @@
             </div>
         </div>
 
+        <EvaluationPanel
+            v-model:show="evaluation.isPanelVisible.value"
+            :is-evaluating="panelProps.isEvaluating"
+            :result="panelProps.result"
+            :stream-content="panelProps.streamContent"
+            :error="panelProps.error"
+            :current-type="panelProps.currentType"
+            :score-level="panelProps.scoreLevel"
+            :rewrite-recommendation="panelProps.rewriteRecommendation"
+            :rewrite-reasons="panelProps.rewriteReasons"
+            :stale="activeEvaluationStale"
+            :stale-message="activeEvaluationStaleMessage"
+            :disable-evaluate="activeEvaluationDisableEvaluate"
+            :disable-evaluate-reason="activeEvaluationDisableReason"
+            :can-rewrite-from-evaluation="false"
+            @apply-local-patch="handleApplyPatch"
+            @apply-improvement="handleApplyImprovement"
+            @re-evaluate="handleReEvaluateActive"
+            @evaluate-with-feedback="handleEvaluateActiveWithFeedback"
+            @clear="handleClearEvaluation"
+            @retry="handleReEvaluateActive"
+        />
+
         <!-- 原始提示词 - 全屏编辑器 -->
         <FullscreenDialog
             v-model="isFullscreen"
@@ -585,22 +901,6 @@
             @confirm="confirmBatchApply"
         />
 
-        <EvaluationPanel
-            v-model:show="evaluation.isPanelVisible.value"
-            :is-evaluating="panelProps.isEvaluating"
-            :result="panelProps.result"
-            :stream-content="panelProps.streamContent"
-            :error="panelProps.error"
-            :current-type="panelProps.currentType"
-            :score-level="panelProps.scoreLevel"
-            @re-evaluate="evaluationHandler.handleReEvaluate"
-            @evaluate-with-feedback="handleEvaluateActiveWithFeedback"
-            @apply-local-patch="handleApplyPatch"
-            @apply-improvement="handleApplyImprovement"
-            @clear="handleClearEvaluation"
-            @retry="evaluationHandler.handleReEvaluate"
-        />
-
         <!-- 子模式本地预览面板：不再依赖 PromptOptimizerApp 的全局预览状态 -->
         <PromptPreviewPanel
             v-model:show="showPromptPreview"
@@ -612,12 +912,18 @@
             :renderPhase="previewRenderPhase"
         />
 
+        <PromptGardenImportDialog
+            v-model:show="showPromptGardenImport"
+            @confirm="handlePromptGardenImportConfirm"
+        />
+
         <!-- 模板管理器由 App 统一管理，这里不再渲染 -->
     </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, inject, ref, reactive, computed, watch, nextTick, toRef, type Ref } from 'vue'
+import { useRouter, type LocationQueryRaw } from 'vue-router'
 
 import {
     NCard,
@@ -625,45 +931,72 @@ import {
     NInput,
     NEmpty,
     NSpace,
-    NImage,
     NText,
     NFlex,
     NGrid,
     NGridItem,
     NIcon,
     NTag,
-    NSelect,
     NRadioGroup,
     NRadioButton,
     NTooltip,
 } from "naive-ui";
 import { useI18n } from "vue-i18n";
 import PromptPanelUI from "../PromptPanel.vue";
+import WorkspaceUtilityMenu from '../common/WorkspaceUtilityMenu.vue'
+import ThemedTooltip from '../common/ThemedTooltip.vue'
+import PromptGardenInspirationPopover from '../common/PromptGardenInspirationPopover.vue'
+import PromptGardenImportDialog from '../common/PromptGardenImportDialog.vue'
 import PromptPreviewPanel from "../PromptPreviewPanel.vue";
+import ImageModelQuickSwitch from "../ImageModelQuickSwitch.vue";
 import SelectWithConfig from "../SelectWithConfig.vue";
-import { EvaluationPanel } from '../evaluation'
-import { provideEvaluation } from '../../composables/prompt/useEvaluationContext';
+import TextModelQuickSwitch from "../TextModelQuickSwitch.vue";
+import TestPanelVersionSelect from '../TestPanelVersionSelect.vue'
+import TestSourceLinkedCard from '../TestSourceLinkedCard.vue'
+import TestVariantSourceTag from '../TestVariantSourceTag.vue'
+import { AnalyzeActionIcon, EvaluationPanel, EvaluationScoreBadge, FocusAnalyzeButton } from '../evaluation'
 import { useLocalPromptPreviewPanel } from '../../composables/prompt/useLocalPromptPreviewPanel'
 import { OptionAccessors } from "../../utils/data-transformer";
 import type { AppServices } from "../../types/services";
 import { useFullscreen } from "../../composables/ui/useFullscreen";
+import { useTooltipTheme } from '../../composables/ui/useTooltipTheme'
 import FullscreenDialog from "../FullscreenDialog.vue";
 import type { SelectOption } from "../../types/select-options";
 import { useToast } from "../../composables/ui/useToast";
 import { getI18nErrorMessage } from '../../utils/error'
+import { withHistorySourceBindingMetadata } from '../../utils/history-source-binding'
+import { resolveSourceAssetRef } from '../../utils/source-asset'
+import { downloadImageSource } from '../../utils/image-download'
+import { createImagePromptAnalysisVersion } from '../../utils/imagePromptAnalysis'
+import type { PromptGardenImportRequest } from '../../utils/prompt-garden-import'
+import {
+    resolveReferencePromptPreview,
+    type ReferenceApplicationMode,
+} from '../../services/ImageStyleExtractor'
 import { VariableAwareInput } from '../variable-extraction'
 import TemporaryVariablesPanel from '../variable/TemporaryVariablesPanel.vue'
 import VariableValuePreviewDialog from '../variable/VariableValuePreviewDialog.vue'
+import AppPreviewImage from '../media/AppPreviewImage.vue'
+import SaveTestResultExampleButton from '../SaveTestResultExampleButton.vue'
 import { useTemporaryVariables } from '../../composables/variable/useTemporaryVariables'
 import { useVariableAwareInputBridge } from '../../composables/variable/useVariableAwareInputBridge'
 import { useTestVariableManager } from '../../composables/variable/useTestVariableManager'
 import { useSmartVariableValueGeneration } from '../../composables/variable/useSmartVariableValueGeneration'
+import { useEvaluationHandler } from '../../composables/prompt/useEvaluationHandler'
+import { provideEvaluation } from '../../composables/prompt/useEvaluationContext'
+import { useTestSourceAreaFeedback } from '../../composables/prompt/useTestSourceAreaFeedback'
+import { useTestVariantSourceFeedback } from '../../composables/prompt/useTestVariantSourceFeedback'
 import type { VariableManagerHooks } from '../../composables/prompt/useVariableManager'
 import {
     buildPromptExecutionContext,
     hashString,
     hashVariables,
 } from '../../utils/prompt-variables'
+import {
+    buildTestPanelVersionOptions,
+    resolveTestPanelVersionSelection,
+    type ResolvedTestPanelVersionSelection,
+} from '../../utils/testPanelVersion'
 import {
     useImageText2ImageSession,
     type TestColumnCount,
@@ -672,10 +1005,24 @@ import {
     type TestVariantId,
 } from '../../stores/session/useImageText2ImageSession'
 import { useImageGeneration } from '../../composables/image/useImageGeneration'
-import { useEvaluationHandler, type TestResultsData } from '../../composables/prompt/useEvaluationHandler'
+import {
+    useReferenceImageActions,
+    type ReferenceActionKind,
+} from '../../composables/image/useReferenceImageActions'
+import ImageTokenUsage from './ImageTokenUsage.vue'
+import { useFunctionModelManager } from '../../composables/model'
 import { useWorkspaceTemplateSelection } from '../../composables/workspaces/useWorkspaceTemplateSelection'
 import { useWorkspaceTextModelSelection } from '../../composables/workspaces/useWorkspaceTextModelSelection'
 import { useElementSize } from '@vueuse/core'
+import { runTasksWithExecutionMode } from '../../utils/runTasksSequentially'
+import {
+    buildImageText2ImageComparePayload,
+    buildImageText2ImageResultEvaluationTargets,
+    canEvaluateImageText2ImageCompare,
+    canEvaluateImageText2ImageResult,
+    shouldShowImageText2ImageCompareAction,
+    shouldShowImageText2ImageResultAction,
+} from './imageText2ImageEvaluation'
 import {
     applyPatchOperationsToText,
     type ContextMode,
@@ -685,18 +1032,30 @@ import {
     type ImageResultItem,
     type OptimizationMode,
     type OptimizationRequest,
+    type PatchOperation,
     type PromptRecordChain,
     type PromptRecordType,
-    type PatchOperation,
     type Template,
+    type TextModelConfig,
 } from '@prompt-optimizer/core'
 import { v4 as uuidv4 } from 'uuid'
 
 // 国际化
 const { t } = useI18n();
+const router = useRouter()
 
 // Toast
 const toast = useToast();
+const {
+    tooltipThemeOverrides: referenceActionTooltipThemeOverrides,
+    tooltipOverlayStyle: referenceActionTooltipOverlayStyle,
+    tooltipContentStyle: referenceActionTooltipContentStyle,
+} = useTooltipTheme({
+    maxWidth: '220px',
+    whiteSpace: 'normal',
+    overflowWrap: 'break-word',
+    padding: '10px 12px',
+})
 
 // 服务注入
 const services = inject<Ref<AppServices | null>>("services", ref(null));
@@ -785,7 +1144,18 @@ const promptService = computed(() => services.value?.promptService)
 
 // 过程态（本地，不持久化）
 const isOptimizing = ref(false)
+const isAnalyzing = ref(false)
 const isIterating = ref(false)
+const isExtractingFromImage = ref(false)
+const extractImageInputRef = ref<HTMLInputElement | null>(null)
+type ReferenceImagePayload = {
+    base64: string
+    mimeType: string
+}
+
+const referenceImagePayload = ref<ReferenceImagePayload | null>(null)
+const referenceActionPendingCount = ref(0)
+const referenceActionPreviewToken = ref(0)
 
 // 历史管理专用 ref（不写入 session store）
 const currentChainId = ref('')
@@ -797,6 +1167,39 @@ const originalPrompt = computed<string>({
     get: () => session.originalPrompt || '',
     set: (value) => session.updatePrompt(value || ''),
 })
+
+const showPromptGardenImport = ref(false)
+
+const isPromptGardenGuideDisabled = computed(() =>
+    isOptimizing.value || isIterating.value || isAnyVariantRunning.value || isExtractingFromImage.value,
+)
+
+const handlePromptGardenImportConfirm = async (request: PromptGardenImportRequest) => {
+    if (!request.importCode) return false
+
+    const currentRoute = router.currentRoute.value
+    const query: LocationQueryRaw = {
+        ...currentRoute.query,
+        importCode: request.importCode,
+    }
+    if (request.exampleId) {
+        query.exampleId = request.exampleId
+    } else {
+        delete query.exampleId
+    }
+    if (request.subModeKey) {
+        query.subModeKey = request.subModeKey
+    } else {
+        delete query.subModeKey
+    }
+
+    await router.push({
+        path: currentRoute.path,
+        query,
+    })
+
+    return true
+}
 
 const optimizedPrompt = computed<string>({
     get: () => session.optimizedPrompt || '',
@@ -825,6 +1228,8 @@ const optimizedReasoning = computed<string>({
 // Text 模型选择（与模板选择对齐：自动刷新 + 兜底写回 session store）
 const modelSelection = useWorkspaceTextModelSelection(services, session)
 const selectedTextModelKey = modelSelection.selectedTextModelKey
+const functionModelManager = useFunctionModelManager(services)
+const effectiveImageRecognitionModelKey = functionModelManager.effectiveImageRecognitionModel
 
 const selectedImageModelKey = computed<string>({
     get: () => session.selectedImageModelKey || '',
@@ -854,6 +1259,55 @@ const optimizationMode = 'user' as OptimizationMode
 const advancedModeEnabled = false
 
 const selectedTemplate = templateSelection.selectedTemplate
+
+const ensureModelManagerInitializedIfSupported = async (manager: unknown) => {
+    if (!manager || typeof manager !== 'object') return
+
+    const maybeInitializable = manager as { ensureInitialized?: () => Promise<void> }
+    if (typeof maybeInitializable.ensureInitialized === 'function') {
+        await maybeInitializable.ensureInitialized()
+    }
+}
+
+const getImageRecognitionModelConfig = async (): Promise<TextModelConfig> => {
+    const manager = services.value?.modelManager
+    if (!manager) {
+        throw new Error(t('toast.error.serviceInit'))
+    }
+
+    await ensureModelManagerInitializedIfSupported(manager)
+    await functionModelManager.initialize()
+
+    const modelKey = functionModelManager.effectiveImageRecognitionModel.value || ''
+    if (!modelKey) {
+        throw new Error(t('functionModel.noImageRecognitionModel'))
+    }
+
+    const modelConfig = await manager.getModel(modelKey)
+    if (!modelConfig) {
+        throw new Error(t('functionModel.noImageRecognitionModel'))
+    }
+
+    return modelConfig
+}
+
+const openFunctionModelManager = () => {
+    if (appOpenModelManager) {
+        appOpenModelManager('function')
+        return
+    }
+
+    if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+            new CustomEvent('model-manager:set-tab', { detail: 'function' }),
+        )
+    }
+}
+
+const promptConfigureImageRecognitionModel = () => {
+    toast.error(t('functionModel.noImageRecognitionModel'))
+    openFunctionModelManager()
+}
 
 // PromptPanel 需要 Template 对象的 v-model；用 wrapper 同步写回 iterateTemplateId
 const selectedIterateTemplate = computed<Template | null>({
@@ -967,17 +1421,17 @@ const variantAVersionModel = computed<TestPanelVersionValue>({
 })
 
 const variantBVersionModel = computed<TestPanelVersionValue>({
-    get: () => getVariant('b')?.version ?? 'latest',
+    get: () => getVariant('b')?.version ?? 'workspace',
     set: (value) => session.updateTestVariant('b', { version: value }),
 })
 
 const variantCVersionModel = computed<TestPanelVersionValue>({
-    get: () => getVariant('c')?.version ?? 'latest',
+    get: () => getVariant('c')?.version ?? 'workspace',
     set: (value) => session.updateTestVariant('c', { version: value }),
 })
 
 const variantDVersionModel = computed<TestPanelVersionValue>({
-    get: () => getVariant('d')?.version ?? 'latest',
+    get: () => getVariant('d')?.version ?? 'workspace',
     set: (value) => session.updateTestVariant('d', { version: value }),
 })
 
@@ -1005,6 +1459,7 @@ const ALL_VARIANT_IDS: TestVariantId[] = ['a', 'b', 'c', 'd']
 const activeVariantIds = computed<TestVariantId[]>(() =>
     ALL_VARIANT_IDS.slice(0, testColumnCountModel.value),
 )
+const useStackedVariantControls = computed(() => activeVariantIds.value.length >= 2)
 
 const variantVersionModels = {
     a: variantAVersionModel,
@@ -1037,24 +1492,23 @@ const testGridTemplateColumns = computed(
     () => `repeat(${testColumnCountModel.value}, minmax(0, 1fr))`,
 )
 
-// 版本选项：原始(v0) + 中间版本(v1..v(n-1)) + 最新(latest)
+const getTestPanelVersionLabels = () => ({
+    workspace: t('test.layout.workspace'),
+    previous: t('test.layout.previous'),
+    original: t('test.layout.original'),
+})
+
+// 版本选项：默认显示“工作区”与“原始(v0)”；存在可用上一版时显示“上一版(vN)”动态别名。
 const versionOptions = computed(() => {
-    const versions = currentVersions.value || []
-
-    const sortedVersions = versions
-        .map((v) => v.version)
-        .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 1)
-        .slice()
-        .sort((a, b) => a - b)
-
-    const latest = sortedVersions.length ? sortedVersions[sortedVersions.length - 1] : null
-    const middle = latest ? sortedVersions.filter((v) => v < latest) : []
-
-    return [
-        { label: t('test.layout.original'), value: 0 },
-        ...middle.map((v) => ({ label: `v${v}`, value: v })),
-        { label: t('test.layout.latest'), value: 'latest' },
-    ]
+    return buildTestPanelVersionOptions(
+        currentVersions.value || [],
+        getTestPanelVersionLabels(),
+        {
+            currentVersionId: currentVersionId.value,
+            workspacePrompt: optimizedPrompt.value || '',
+            originalPrompt: originalPrompt.value || '',
+        },
+    )
 })
 
 // 确保测试列的模型选择始终有效（模型列表变化时自动 fallback）
@@ -1078,35 +1532,16 @@ watch(
     { immediate: true },
 )
 
-type ResolvedPrompt = { text: string; resolvedVersion: number }
-
-const resolvePromptForSelection = (selection: TestPanelVersionValue): ResolvedPrompt => {
-    const v0 = originalPrompt.value || ''
-    const versions = currentVersions.value || []
-
-    const latest = versions.reduce<{ version: number; optimizedPrompt: string } | null>((acc, v) => {
-        if (typeof v.version !== 'number' || v.version < 1) return acc
-        const next = { version: v.version, optimizedPrompt: v.optimizedPrompt || '' }
-        if (!acc || next.version > acc.version) return next
-        return acc
-    }, null)
-
-    if (selection === 0) {
-        return { text: v0, resolvedVersion: 0 }
-    }
-
-    if (selection === 'latest') {
-        if (!latest) return { text: optimizedPrompt.value || v0, resolvedVersion: 0 }
-        return { text: latest.optimizedPrompt || '', resolvedVersion: latest.version }
-    }
-
-    const target = versions.find((v) => v.version === selection)
-    if (target) {
-        return { text: target.optimizedPrompt || '', resolvedVersion: target.version }
-    }
-
-    if (latest) return { text: latest.optimizedPrompt || '', resolvedVersion: latest.version }
-    return { text: optimizedPrompt.value || v0, resolvedVersion: 0 }
+const resolvePromptForSelection = (
+    selection: TestPanelVersionValue,
+): ResolvedTestPanelVersionSelection => {
+    return resolveTestPanelVersionSelection({
+        selection,
+        versions: currentVersions.value || [],
+        currentVersionId: currentVersionId.value,
+        workspacePrompt: optimizedPrompt.value || '',
+        originalPrompt: originalPrompt.value || '',
+    })
 }
 
 // 注意：Pinia setup store 会把 ref 自动解包；直接赋值会丢失响应性。
@@ -1117,6 +1552,7 @@ const variantResults = computed(
 const variantLastRunFingerprint = computed(
     () => session.testVariantLastRunFingerprint as unknown as Record<TestVariantId, string>,
 )
+void variantLastRunFingerprint.value
 
 const variantRunning = reactive<Record<TestVariantId, boolean>>({
     a: false,
@@ -1125,11 +1561,32 @@ const variantRunning = reactive<Record<TestVariantId, boolean>>({
     d: false,
 })
 
+const { variantSourceFeedback, pulseVariantSource } =
+    useTestVariantSourceFeedback<TestVariantId>(['a', 'b', 'c', 'd'])
+const { sourceAreaFeedback, pulseSourceAreaForSelection } =
+    useTestSourceAreaFeedback()
+
 const isAnyVariantRunning = computed(() =>
     activeVariantIds.value.some((id) => !!variantRunning[id]),
 )
 
 const getVariantLabel = (id: TestVariantId) => ({ a: 'A', b: 'B', c: 'C', d: 'D' }[id])
+
+const handleVariantVersionChange = (id: TestVariantId, value: string | number) => {
+    const selection = value as TestPanelVersionValue
+    variantVersionModels[id].value = selection
+    activateVariantSource(id)
+}
+
+const activateVariantSource = (id: TestVariantId) => {
+    const selection = variantVersionModels[id].value
+    const resolved = resolvePromptForSelection(selection)
+    pulseVariantSource(id, 'change')
+    pulseSourceAreaForSelection(selection, resolved.resolvedVersion, 'change')
+}
+
+const getVariantResolvedVersion = (id: TestVariantId): number =>
+    resolvePromptForSelection(variantVersionModels[id].value).resolvedVersion
 
 const getVariantVersionTestId = (id: TestVariantId) => {
     if (id === 'a') return 'image-text2image-test-original-version-select'
@@ -1197,7 +1654,7 @@ const handleOpenPromptPreview = () => {
     openPromptPreview(optimizedPrompt.value || '', { renderPhase: 'test' })
 }
 
-const buildRuntimePredefinedVariables = (resolved: ResolvedPrompt): Record<string, string> => {
+const buildRuntimePredefinedVariables = (resolved: ResolvedTestPanelVersionSelection): Record<string, string> => {
     const current = (resolved.text || '').trim()
     return {
         // Align with core PREDEFINED_VARIABLES (packages/core/src/services/context/constants.ts)
@@ -1221,12 +1678,434 @@ const getVariantFingerprint = (id: TestVariantId) => {
     return `${String(selection)}:${resolved.resolvedVersion}:${modelKey}:${promptHash}:${varsHash}`
 }
 
-const isVariantStale = (id: TestVariantId) => {
-    if (!hasVariantResult(id)) return false
-    const prev = variantLastRunFingerprint.value[id]
-    if (!prev) return false
-    return prev !== getVariantFingerprint(id)
+const evaluationVersionLabels = computed(() => getTestPanelVersionLabels())
+
+const evaluationVariants = computed(() =>
+    activeVariantIds.value.map((id) => {
+        const resolvedPrompt = resolvePromptForSelection(variantVersionModels[id].value)
+        return {
+            id,
+            label: getVariantLabel(id),
+            resolvedPrompt,
+            promptText: resolvedPrompt.text,
+            modelKey: (variantModelKeyModels[id].value || '').trim() || undefined,
+            result: getVariantResult(id),
+        }
+    }),
+)
+
+const imageEvaluationContext = computed(() => ({
+    originalIntent: originalPrompt.value || '',
+    workspacePrompt: optimizedPrompt.value || '',
+    referencePrompt: originalPrompt.value || '',
+    versionLabels: evaluationVersionLabels.value,
+}))
+
+const resultEvaluationTargets = computed(() =>
+    buildImageText2ImageResultEvaluationTargets({
+        context: imageEvaluationContext.value,
+        variants: evaluationVariants.value,
+    }),
+)
+
+const comparePayload = computed(() =>
+    buildImageText2ImageComparePayload({
+        context: imageEvaluationContext.value,
+        variants: evaluationVariants.value,
+    }),
+)
+
+const hasImageRecognitionModel = computed(
+    () => !!(effectiveImageRecognitionModelKey.value || '').trim(),
+)
+
+const resultEvaluationFingerprint = reactive<Record<TestVariantId, string>>({
+    a: '',
+    b: '',
+    c: '',
+    d: '',
+})
+const compareEvaluationFingerprint = ref('')
+
+const evaluationHandler = useEvaluationHandler({
+    services,
+    analysisOptimizedPrompt: computed(() => optimizedPrompt.value || ''),
+    analysisTargetResolver: (defaultTarget) => ({
+        ...defaultTarget,
+        referencePrompt: (originalPrompt.value || '').trim() || undefined,
+    }),
+    resultTargets: resultEvaluationTargets,
+    comparePayload,
+    evaluationModelKey: computed(() => selectedTextModelKey.value || ''),
+    resolveEvaluationModelKey: async (type) => {
+        await functionModelManager.initialize()
+
+        if (type === 'result' || type === 'compare') {
+            const modelKey =
+                functionModelManager.effectiveImageRecognitionModel.value || ''
+            if (!modelKey) {
+                throw new Error(t('functionModel.noImageRecognitionModel'))
+            }
+            return modelKey
+        }
+
+        return (
+            functionModelManager.evaluationModel.value ||
+            selectedTextModelKey.value ||
+            functionModelManager.effectiveEvaluationModel.value ||
+            ''
+        )
+    },
+    functionMode: computed(() => 'image'),
+    subMode: computed(() => 'text2image'),
+    persistedResults: toRef(session, 'evaluationResults'),
+})
+
+provideEvaluation(evaluationHandler.evaluation)
+
+const { evaluation, handleEvaluate: handleEvaluateInternal } = evaluationHandler
+const panelProps = evaluationHandler.panelProps
+const getResultEvaluationProps = (variantId: string) =>
+    evaluationHandler.getResultEvaluationProps(variantId)
+
+const handleAnalyzePrompt = async () => {
+    const prompt = originalPrompt.value.trim()
+    if (!prompt || isAnalyzing.value) return
+
+    isAnalyzing.value = true
+    try {
+        const virtualV0 = createImagePromptAnalysisVersion(
+            prompt,
+            'text2imageOptimize' as PromptRecordType,
+        )
+        currentChainId.value = ''
+        currentVersions.value = [virtualV0]
+        currentVersionId.value = virtualV0.id
+        session.updateOptimizedResult({
+            optimizedPrompt: prompt,
+            reasoning: '',
+            chainId: '',
+            versionId: '',
+        })
+        evaluation.clearResult('prompt-only')
+        evaluation.clearResult('prompt-iterate')
+        await nextTick()
+        await handleEvaluateInternal('prompt-only')
+    } finally {
+        isAnalyzing.value = false
+    }
 }
+
+const isEvaluatingCompare = evaluationHandler.compareEvaluation.isEvaluatingCompare
+const compareScore = computed(
+    () => evaluationHandler.compareEvaluation.compareScore.value ?? 0,
+)
+const hasCompareEvaluation = evaluationHandler.compareEvaluation.hasCompareResult
+const compareEvaluationResult = computed(() => evaluation.state.compare.result)
+const compareScoreLevel = computed(() =>
+    evaluation.getScoreLevel(
+        evaluationHandler.compareEvaluation.compareScore.value ?? null,
+    ),
+)
+
+const compareReadyVariantIds = computed(() =>
+    activeVariantIds.value.filter((id) => !!resultEvaluationTargets.value[id]),
+)
+const hasCompareCandidates = computed(() => compareReadyVariantIds.value.length >= 2)
+const hasWorkspaceCompareCandidate = computed(() =>
+    compareReadyVariantIds.value.some((id) =>
+        evaluationVariants.value.find((variant) => variant.id === id)?.resolvedPrompt.promptKind === 'workspace'
+    ),
+)
+
+const buildCompareEvaluationFingerprint = () =>
+    compareReadyVariantIds.value
+        .map((id) => `${id}:${getVariantFingerprint(id)}`)
+        .join('|')
+
+const isResultEvaluationStale = (id: TestVariantId) => {
+    const props = getResultEvaluationProps(id)
+    if (!props.hasEvaluation) return false
+
+    const storedFingerprint = resultEvaluationFingerprint[id]
+    if (!storedFingerprint) return false
+
+    return storedFingerprint !== getVariantFingerprint(id)
+}
+
+const isCompareEvaluationStale = computed(() => {
+    if (!hasCompareEvaluation.value) return false
+    if (!compareEvaluationFingerprint.value) return false
+    return compareEvaluationFingerprint.value !== buildCompareEvaluationFingerprint()
+})
+
+const shouldShowResultEvaluationAction = (id: TestVariantId) =>
+    shouldShowImageText2ImageResultAction(
+        id,
+        resultEvaluationTargets.value,
+        getResultEvaluationProps(id).hasEvaluation,
+    )
+
+const canEvaluateResult = (id: TestVariantId) =>
+    canEvaluateImageText2ImageResult(
+        id,
+        resultEvaluationTargets.value,
+        hasImageRecognitionModel.value,
+    )
+
+const shouldShowCompareEvaluationAction = computed(() =>
+    shouldShowImageText2ImageCompareAction(
+        comparePayload.value,
+        hasCompareEvaluation.value,
+        hasCompareCandidates.value,
+    ),
+)
+
+const canEvaluateCompare = computed(() =>
+    canEvaluateImageText2ImageCompare(
+        comparePayload.value,
+        hasImageRecognitionModel.value,
+    ),
+)
+const compareDisabledReason = computed(() => {
+    if (canEvaluateCompare.value) {
+        return ''
+    }
+
+    if ((hasCompareCandidates.value || hasCompareEvaluation.value) && !hasWorkspaceCompareCandidate.value) {
+        return t('evaluation.compareUnavailable.missingWorkspace')
+    }
+
+    if ((hasCompareCandidates.value || hasCompareEvaluation.value) && !hasImageRecognitionModel.value) {
+        return t('functionModel.noImageRecognitionModel')
+    }
+
+    return ''
+})
+
+const activeEvaluationStale = computed(() => {
+    if (panelProps.value.currentType === 'compare') {
+        return isCompareEvaluationStale.value
+    }
+
+    if (
+        panelProps.value.currentType === 'result' &&
+        panelProps.value.currentVariantId &&
+        panelProps.value.currentVariantId in resultEvaluationFingerprint
+    ) {
+        return isResultEvaluationStale(
+            panelProps.value.currentVariantId as TestVariantId,
+        )
+    }
+
+    return false
+})
+
+const activeEvaluationStaleMessage = computed(() => {
+    if (panelProps.value.currentType === 'compare') {
+        return t('evaluation.stale.compare')
+    }
+
+    if (panelProps.value.currentType === 'result') {
+        return t('evaluation.stale.result')
+    }
+
+    return t('evaluation.stale.default')
+})
+
+const activeEvaluationDisableEvaluate = computed(() => {
+    if (panelProps.value.currentType === 'compare') {
+        return !canEvaluateCompare.value
+    }
+
+    if (
+        panelProps.value.currentType === 'result' &&
+        panelProps.value.currentVariantId
+    ) {
+        return !canEvaluateResult(
+            panelProps.value.currentVariantId as TestVariantId,
+        )
+    }
+
+    return false
+})
+const activeEvaluationDisableReason = computed(() => {
+    if (panelProps.value.currentType === 'compare') {
+        return compareDisabledReason.value
+    }
+
+    return ''
+})
+
+const ensureImageEvaluationModelReady = (): boolean => {
+    if (hasImageRecognitionModel.value) {
+        return true
+    }
+
+    promptConfigureImageRecognitionModel()
+    return false
+}
+
+const ensureResultEvaluationReady = (variantId: TestVariantId): boolean => {
+    if (!resultEvaluationTargets.value[variantId]) {
+        return false
+    }
+
+    return ensureImageEvaluationModelReady()
+}
+
+const ensureCompareEvaluationReady = (): boolean => {
+    if (!comparePayload.value) {
+        return false
+    }
+
+    return ensureImageEvaluationModelReady()
+}
+
+const updateResultEvaluationFingerprint = (variantId: TestVariantId) => {
+    if (evaluation.state.result[variantId]?.result) {
+        resultEvaluationFingerprint[variantId] = getVariantFingerprint(variantId)
+    }
+}
+
+const updateCompareEvaluationFingerprint = () => {
+    if (evaluation.state.compare.result) {
+        compareEvaluationFingerprint.value = buildCompareEvaluationFingerprint()
+    }
+}
+
+const handleEvaluateResult = async (variantId: TestVariantId) => {
+    if (!ensureResultEvaluationReady(variantId)) return
+
+    await handleEvaluateInternal('result', { variantId })
+    updateResultEvaluationFingerprint(variantId)
+}
+
+const handleResultEvaluateWithFeedbackEvent = async (
+    variantId: TestVariantId,
+    payload: { feedback: string },
+) => {
+    if (!ensureResultEvaluationReady(variantId)) return
+
+    await evaluationHandler.handleEvaluateWithFeedback(
+        'result',
+        payload.feedback,
+        { variantId },
+    )
+    updateResultEvaluationFingerprint(variantId)
+}
+
+const handleEvaluateCompare = async () => {
+    if (!ensureCompareEvaluationReady()) return
+
+    await handleEvaluateInternal('compare')
+    updateCompareEvaluationFingerprint()
+}
+
+const handleCompareEvaluateWithFeedback = async (payload: {
+    feedback: string
+}) => {
+    if (!ensureCompareEvaluationReady()) return
+
+    await evaluationHandler.handleEvaluateWithFeedback(
+        'compare',
+        payload.feedback,
+    )
+    updateCompareEvaluationFingerprint()
+}
+
+const handleReEvaluateActive = async () => {
+    const active = evaluation.state.activeDetail
+    if (!active) return
+
+    if (
+        active.type === 'result' &&
+        (!active.variantId ||
+            !ensureResultEvaluationReady(active.variantId as TestVariantId))
+    ) {
+        return
+    }
+
+    if (active.type === 'compare' && !ensureCompareEvaluationReady()) {
+        return
+    }
+
+    await evaluationHandler.handleReEvaluate()
+
+    if (active.type === 'result' && active.variantId) {
+        updateResultEvaluationFingerprint(active.variantId as TestVariantId)
+    } else if (active.type === 'compare') {
+        updateCompareEvaluationFingerprint()
+    }
+}
+
+const handleEvaluateActiveWithFeedback = async (payload: {
+    feedback: string
+}) => {
+    const active = evaluation.state.activeDetail
+    if (!active) return
+
+    if (
+        active.type === 'result' &&
+        (!active.variantId ||
+            !ensureResultEvaluationReady(active.variantId as TestVariantId))
+    ) {
+        return
+    }
+
+    if (active.type === 'compare' && !ensureCompareEvaluationReady()) {
+        return
+    }
+
+    await evaluationHandler.handleEvaluateActiveWithFeedback(payload.feedback)
+
+    if (active.type === 'result' && active.variantId) {
+        updateResultEvaluationFingerprint(active.variantId as TestVariantId)
+    } else if (active.type === 'compare') {
+        updateCompareEvaluationFingerprint()
+    }
+}
+
+const showResultDetail = (variantId: TestVariantId) => {
+    evaluation.showDetail('result', variantId)
+}
+
+const showCompareDetail = () => {
+    evaluation.showDetail('compare')
+}
+
+const handleClearEvaluation = () => {
+    evaluation.closePanel()
+    evaluation.clearAllResults()
+    resultEvaluationFingerprint.a = ''
+    resultEvaluationFingerprint.b = ''
+    resultEvaluationFingerprint.c = ''
+    resultEvaluationFingerprint.d = ''
+    compareEvaluationFingerprint.value = ''
+}
+
+const handleClearContent = () => {
+    currentChainId.value = ''
+    currentVersions.value = []
+    currentVersionId.value = ''
+    referenceImagePayload.value = null
+    referenceActionPendingCount.value = 0
+    referenceActionPreviewToken.value = 0
+    isExtractingFromImage.value = false
+    referenceAction.resetState()
+    session.clearContent()
+    handleClearEvaluation()
+}
+
+watch(
+    () => [session.chainId, session.versionId, session.optimizedPrompt] as const,
+    ([chainId, versionId, optimized]) => {
+        if (chainId || versionId || optimized) return
+        currentChainId.value = ''
+        currentVersions.value = []
+        currentVersionId.value = ''
+    },
+)
 
 const getVariantRequest = (id: TestVariantId): Text2ImageRequest | null => {
     const modelKey = (variantModelKeyModels[id].value || '').trim()
@@ -1238,6 +2117,8 @@ const getVariantRequest = (id: TestVariantId): Text2ImageRequest | null => {
     const resolved = resolvePromptForSelection(variantVersionModels[id].value)
     if (!resolved.text?.trim()) {
         toast.error(t('imageWorkspace.generation.missingRequiredFields'))
+        pulseVariantSource(id, 'error')
+        pulseSourceAreaForSelection(variantVersionModels[id].value, resolved.resolvedVersion, 'error')
         return null
     }
 
@@ -1278,6 +2159,16 @@ const queueSessionSave = () => {
         .catch((e) => {
             console.error('[ImageText2ImageWorkspace] Failed to persist image session:', e)
         })
+    return sessionSaveChain
+}
+
+const saveSessionAfterHistoryCommit = async (reason: string) => {
+    try {
+        await session.saveSession()
+    } catch (e) {
+        console.error(`[ImageText2ImageWorkspace] Failed to persist image session after ${reason}:`, e)
+        toast.warning(t('toast.warning.saveHistoryFailed'))
+    }
 }
 
 const runVariant = async (
@@ -1287,12 +2178,17 @@ const runVariant = async (
         silentError?: boolean
         persist?: boolean
         allowParallel?: boolean
+        skipClearEvaluation?: boolean
     },
 ): Promise<boolean> => {
     if (variantRunning[id]) return false
 
     const request = getVariantRequest(id)
     if (!request) return false
+
+    if (!opts?.skipClearEvaluation) {
+        evaluationHandler.clearBeforeTest()
+    }
 
     variantRunning[id] = true
     try {
@@ -1334,8 +2230,17 @@ const runAllVariants = async () => {
         if (!getVariantRequest(id)) return
     }
 
-    const results = await Promise.all(
-        ids.map((id) => runVariant(id, { silentSuccess: true, silentError: true, persist: false })),
+    evaluationHandler.clearBeforeTest()
+
+    const results = await runTasksWithExecutionMode(
+        ids,
+        async (id) =>
+            runVariant(id, {
+                silentSuccess: true,
+                silentError: true,
+                persist: false,
+                skipClearEvaluation: true,
+            }),
     )
 
     queueSessionSave()
@@ -1345,46 +2250,6 @@ const runAllVariants = async () => {
     } else {
         toast.error(t('imageWorkspace.generation.generateFailed'))
     }
-}
-
-// 评估处理器（图像模式专用：testResults 不参与）
-const evaluationHandler = useEvaluationHandler({
-    services,
-    originalPrompt,
-    optimizedPrompt,
-    testContent: computed(() => ''),
-    testResults: ref<TestResultsData | null>(null),
-    evaluationModelKey: selectedTextModelKey,
-    functionMode: computed(() => 'image'),
-    subMode: computed(() => 'text2image'),
-    persistedResults: toRef(session, 'evaluationResults'),
-})
-
-// 提供评估上下文给 PromptPanel（子模式私有；结果持久化在 session store）
-provideEvaluation(evaluationHandler.evaluation)
-
-const { evaluation } = evaluationHandler
-const panelProps = evaluationHandler.panelProps
-
-const handleEvaluateActiveWithFeedback = async (payload: { feedback: string }) => {
-    await evaluationHandler.handleEvaluateActiveWithFeedback(payload.feedback)
-}
-
-const handleApplyImprovement = (payload: { improvement: string }) => {
-    evaluation.closePanel()
-    promptPanelRef.value?.openIterateDialog?.(payload.improvement)
-}
-
-const handleApplyPatch = (payload: { operation: PatchOperation }) => {
-    if (!payload.operation) return
-    const current = optimizedPrompt.value || ''
-    const result = applyPatchOperationsToText(current, payload.operation)
-    if (!result.ok) {
-        toast.warning(t('toast.warning.patchApplyFailed'))
-        return
-    }
-    optimizedPrompt.value = result.text
-    toast.success(t('evaluation.diagnose.applyFix'))
 }
 
 // 保存本地编辑
@@ -1416,7 +2281,7 @@ const handleSaveLocalEdit = async (payload: { note?: string }) => {
                   modelKey,
                   templateId,
                   iterationNote: payload.note,
-                  metadata: {
+                  metadata: withHistorySourceBindingMetadata({
                       optimizationMode: 'user' as OptimizationMode,
                       functionMode: 'image',
                       localEdit: true,
@@ -1424,7 +2289,7 @@ const handleSaveLocalEdit = async (payload: { note?: string }) => {
                       imageModelKey: selectedImageModelKey.value,
                       hasInputImage: false,
                       compareMode: isCompareMode.value,
-                  },
+                  }, session),
               })
             : await historyManager.value.createNewChain({
                   id: uuidv4(),
@@ -1434,7 +2299,7 @@ const handleSaveLocalEdit = async (payload: { note?: string }) => {
                   modelKey,
                   templateId,
                   timestamp: Date.now(),
-                  metadata: {
+                  metadata: withHistorySourceBindingMetadata({
                       optimizationMode: 'user' as OptimizationMode,
                       functionMode: 'image',
                       localEdit: true,
@@ -1442,7 +2307,7 @@ const handleSaveLocalEdit = async (payload: { note?: string }) => {
                       imageModelKey: selectedImageModelKey.value,
                       hasInputImage: false,
                       compareMode: isCompareMode.value,
-                  },
+                  }, session),
               })
 
         currentChainId.value = chain.chainId
@@ -1455,6 +2320,7 @@ const handleSaveLocalEdit = async (payload: { note?: string }) => {
             chainId: chain.chainId,
             versionId: chain.currentRecord.id,
         })
+        await saveSessionAfterHistoryCommit('local edit commit')
 
         window.dispatchEvent(new CustomEvent('prompt-optimizer:history-refresh'))
         toast.success(t('toast.success.localEditSaved'))
@@ -1464,13 +2330,22 @@ const handleSaveLocalEdit = async (payload: { note?: string }) => {
     }
 }
 
-const handleClearEvaluation = () => {
-    evaluation.closePanel()
-    evaluation.clearAllResults()
-}
-
 // PromptPanel 引用，用于在语言切换后刷新迭代模板选择
 const promptPanelRef = ref<InstanceType<typeof PromptPanelUI> | null>(null);
+
+const handleApplyImprovement = evaluationHandler.createApplyImprovementHandler(promptPanelRef)
+
+const handleApplyPatch = (payload: { operation: PatchOperation }) => {
+    if (!payload.operation) return
+    const current = optimizedPrompt.value || ''
+    const result = applyPatchOperationsToText(current, payload.operation)
+    if (!result.ok) {
+        toast.warning(t('toast.warning.patchApplyFailed'))
+        return
+    }
+    optimizedPrompt.value = result.text
+    toast.success(t('evaluation.diagnose.applyFix'))
+}
 
 // 输入区折叠状态（初始展开）
 const isInputPanelCollapsed = ref(false);
@@ -1483,59 +2358,216 @@ const promptSummary = computed(() => {
         : originalPrompt.value;
 });
 
-/** 是否正在执行分析 */
-const isAnalyzing = ref(false);
-
-/**
- * 处理分析操作
- */
-const handleAnalyze = async () => {
-    if (!originalPrompt.value?.trim()) return;
-    if (isOptimizing.value) return;
-
-    isAnalyzing.value = true;
-
-    // 1. 清空版本链，创建虚拟 V0
-    const virtualV0Id = uuidv4()
-    const virtualV0: PromptRecordChain['versions'][number] = {
-        id: virtualV0Id,
-        chainId: '',
-        version: 0,
-        originalPrompt: originalPrompt.value,
-        optimizedPrompt: originalPrompt.value,
-        type: 'imageOptimize',
-        timestamp: Date.now(),
-        modelKey: '',
-        templateId: '',
-    }
-
+const resetExtractedPromptArtifacts = () => {
     currentChainId.value = ''
-    currentVersions.value = [virtualV0]
-    currentVersionId.value = virtualV0Id
-    optimizedPrompt.value = originalPrompt.value
+    currentVersions.value = []
+    currentVersionId.value = ''
+
+    session.clearAssetBinding()
     session.updateOptimizedResult({
-        optimizedPrompt: originalPrompt.value,
+        optimizedPrompt: '',
         reasoning: '',
         chainId: '',
         versionId: '',
     })
 
-    // 2. 清理旧的提示词评估结果，避免跨提示词残留
-    evaluationHandler.evaluation.clearResult('prompt-only');
-    evaluationHandler.evaluation.clearResult('prompt-iterate');
+}
 
-    // 3. 收起输入区域
-    isInputPanelCollapsed.value = true;
+const syncTemporaryVariables = (variables: Record<string, string>) => {
+    const nextVariables = { ...variables }
+    const existingVariables = tempVarsManager.listVariables()
 
-    await nextTick();
-
-    // 4. 触发 prompt-only 评估
-    try {
-        await evaluationHandler.handleEvaluate('prompt-only');
-    } finally {
-        isAnalyzing.value = false;
+    for (const name of Object.keys(existingVariables)) {
+        if (!(name in nextVariables)) {
+            tempVarsManager.deleteVariable(name)
+        }
     }
-};
+
+    for (const [name, value] of Object.entries(nextVariables)) {
+        tempVarsManager.setVariable(name, value)
+    }
+}
+
+const referenceAction = reactive(useReferenceImageActions({
+    getCurrentPrompt: () => originalPrompt.value,
+    applyPrompt: (prompt) => {
+        originalPrompt.value = prompt
+    },
+    applyVariables: (variables) => {
+        syncTemporaryVariables(variables)
+    },
+    resetPromptArtifacts: resetExtractedPromptArtifacts,
+}))
+
+const referenceActionButtons = computed(() => ([
+    {
+        kind: 'replicate' as ReferenceActionKind,
+        labelKey: 'imageWorkspace.referenceImage.replicateAction',
+        tooltipKey: 'imageWorkspace.referenceImage.replicateActionDescription',
+        loading: isExtractingFromImage.value && referenceAction.actionKind === 'replicate',
+        disabled: isExtractingFromImage.value || isOptimizing.value,
+    },
+    {
+        kind: 'style-learn' as ReferenceActionKind,
+        labelKey: 'imageWorkspace.referenceImage.styleLearnAction',
+        tooltipKey: referenceAction.canTriggerStyleLearning
+            ? 'imageWorkspace.referenceImage.styleLearnActionDescription'
+            : 'imageWorkspace.referenceImage.styleLearnDisabledHint',
+        loading: isExtractingFromImage.value && referenceAction.actionKind === 'style-learn',
+        disabled: isExtractingFromImage.value || isOptimizing.value || !referenceAction.canTriggerStyleLearning,
+    },
+]))
+
+const referenceActionStatusLabelKey = computed(() => {
+    if (referenceAction.status === 'processing') {
+        return 'imageWorkspace.referenceImage.processingStatus'
+    }
+
+    if (referenceAction.status === 'ready') {
+        return 'imageWorkspace.referenceImage.readyStatus'
+    }
+
+    if (referenceAction.status === 'error') {
+        return 'imageWorkspace.referenceImage.errorStatus'
+    }
+
+    return ''
+})
+
+const readImageFileAsBase64 = (file: File): Promise<{ base64: string; mimeType: string }> =>
+    new Promise((resolve, reject) => {
+        const reader = new FileReader()
+
+        reader.onload = () => {
+            const dataUrl = reader.result as string
+            const base64 = dataUrl.split(',')[1]
+            resolve({
+                base64,
+                mimeType: file.type || 'image/png',
+            })
+        }
+
+        reader.onerror = () => {
+            reject(new Error(t('imageWorkspace.upload.readFailed')))
+        }
+
+        reader.readAsDataURL(file)
+    })
+
+const resolveReferenceActionMode = (
+    actionKind: ReferenceActionKind,
+): ReferenceApplicationMode => (actionKind === 'style-learn' ? 'migrate' : 'replicate')
+
+const resolveReferenceActionPreview = async (
+    actionKind: ReferenceActionKind = referenceAction.actionKind,
+    previewToken: number = referenceActionPreviewToken.value,
+) => {
+    if (!referenceImagePayload.value) {
+        return false
+    }
+
+    const modelConfig = await getImageRecognitionModelConfig()
+
+    const preview = await resolveReferencePromptPreview({
+        mode: resolveReferenceActionMode(actionKind),
+        originalPrompt: referenceAction.currentPromptSnapshot,
+        modelConfig,
+        imageB64: referenceImagePayload.value.base64,
+        mimeType: referenceImagePayload.value.mimeType || 'image/png',
+        templateManager: services.value?.templateManager,
+        referenceMode: 'text2image',
+    })
+
+    if (previewToken !== referenceActionPreviewToken.value) {
+        return false
+    }
+
+    referenceAction.setResultPreview(preview)
+    if (!referenceAction.applyToCurrentPrompt()) {
+        return false
+    }
+
+    queueSessionSave()
+    toast.success(t('imageWorkspace.referenceImage.applySuccess'))
+    return true
+}
+
+const beginReferenceActionTask = () => {
+    referenceActionPendingCount.value += 1
+    isExtractingFromImage.value = true
+    referenceAction.beginProcessing()
+}
+
+const endReferenceActionTask = () => {
+    referenceActionPendingCount.value = Math.max(0, referenceActionPendingCount.value - 1)
+    isExtractingFromImage.value = referenceActionPendingCount.value > 0
+}
+
+const createReferenceActionPreviewToken = () => {
+    referenceActionPreviewToken.value += 1
+    return referenceActionPreviewToken.value
+}
+
+const triggerReferenceAction = (actionKind: ReferenceActionKind) => {
+    if (isExtractingFromImage.value) {
+        return
+    }
+
+    if (actionKind === 'style-learn' && !referenceAction.canTriggerStyleLearning) {
+        return
+    }
+
+    referenceAction.requestAction(actionKind)
+    extractImageInputRef.value?.click()
+}
+
+const handleReferenceImageFileChange = async (event: Event) => {
+    const input = event.target as HTMLInputElement | null
+    const file = input?.files?.[0] || null
+
+    if (input) {
+        input.value = ''
+    }
+
+    if (!file || isExtractingFromImage.value) {
+        return
+    }
+
+    if (!effectiveImageRecognitionModelKey.value) {
+        promptConfigureImageRecognitionModel()
+        return
+    }
+
+    if (!/image\/(png|jpeg)/.test(file.type)) {
+        toast.error(t('imageWorkspace.upload.fileTypeNotSupported'))
+        return
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+        toast.error(t('imageWorkspace.upload.fileTooLarge'))
+        return
+    }
+
+    const nextActionKind = referenceAction.actionKind
+    const previewToken = createReferenceActionPreviewToken()
+    beginReferenceActionTask()
+
+    try {
+        const { base64, mimeType } = await readImageFileAsBase64(file)
+        referenceAction.setSourceImagePreview(`data:${mimeType || 'image/png'};base64,${base64}`)
+        referenceImagePayload.value = {
+            base64,
+            mimeType: mimeType || 'image/png',
+        }
+        await resolveReferenceActionPreview(nextActionKind, previewToken)
+    } catch (error) {
+        const errorMessage = getI18nErrorMessage(error, t('imageWorkspace.input.extractFailed'))
+        referenceAction.setError(errorMessage)
+        toast.error(errorMessage)
+    } finally {
+        endReferenceActionTask()
+    }
+}
 
 // 注入 App 层统一的 openTemplateManager / openModelManager / handleSaveFavorite 接口
 type TemplateEntryType =
@@ -1768,13 +2800,13 @@ const createHistoryRecord = async () => {
             modelKey: selectedTextModelKey.value,
             templateId: selectedTemplate.value.id,
             timestamp: Date.now(),
-            metadata: {
+            metadata: withHistorySourceBindingMetadata({
                 optimizationMode: 'user' as OptimizationMode,
                 functionMode: 'image',
                 imageModelKey: selectedImageModelKey.value,
                 hasInputImage: false,
                 compareMode: isCompareMode.value,
-            },
+            }, session),
         }
 
         const newRecord = await historyManager.value.createNewChain(recordData)
@@ -1788,6 +2820,7 @@ const createHistoryRecord = async () => {
             chainId: newRecord.chainId,
             versionId: newRecord.currentRecord.id,
         })
+        await saveSessionAfterHistoryCommit('optimization commit')
 
         window.dispatchEvent(new CustomEvent('prompt-optimizer:history-refresh'))
     } catch (e) {
@@ -1888,6 +2921,7 @@ const handleIteratePrompt = async (payload: {
                                 iterationNote: payload.iterateInput,
                                 modelKey: selectedTextModelKey.value,
                                 templateId: selectedIterateTemplate.value!.id,
+                                metadata: withHistorySourceBindingMetadata(undefined, session),
                             })
                             currentVersions.value = updatedChain.versions
                             currentVersionId.value = updatedChain.currentRecord.id
@@ -1897,6 +2931,7 @@ const handleIteratePrompt = async (payload: {
                                 chainId: updatedChain.chainId,
                                 versionId: updatedChain.currentRecord.id,
                             })
+                            await saveSessionAfterHistoryCommit('iteration commit')
                             window.dispatchEvent(new CustomEvent('prompt-optimizer:history-refresh'))
                         } else {
                             await createHistoryRecord()
@@ -1946,31 +2981,13 @@ const getImageSrc = (imageItem: ImageResultItem | null | undefined) => {
 }
 
 // 下载图像
-const downloadImageFromResult = async (imageItem: ImageResultItem | null | undefined, prefix: string) => {
+const downloadImageFromResult = async (imageItem: ImageResultItem | null | undefined) => {
     if (!imageItem) return
-
-    if (imageItem.url) {
-        try {
-            const response = await fetch(imageItem.url)
-            const blob = await response.blob()
-            const url = window.URL.createObjectURL(blob)
-            const a = document.createElement('a')
-            a.href = url
-            a.download = `${prefix}-image.png`
-            a.click()
-            window.URL.revokeObjectURL(url)
-        } catch {
-            toast.error(t('imageWorkspace.results.downloadFailed'))
-        }
-        return
-    }
-
-    if (imageItem.b64) {
-        const a = document.createElement('a')
-        const mime = imageItem.mimeType ?? 'image/png'
-        a.href = `data:${mime};base64,${imageItem.b64}`
-        a.download = `${prefix}-image.png`
-        a.click()
+    const downloaded = await downloadImageSource(getImageSrc(imageItem), {
+        mimeType: imageItem.mimeType ?? null,
+    })
+    if (!downloaded) {
+        toast.error(t('imageWorkspace.results.downloadFailed'))
     }
 }
 
@@ -2111,11 +3128,14 @@ onUnmounted(() => {
 .image-text2image-workspace {
     width: 100%;
     height: 100%;
-    display: flex;
-    flex-direction: column;
+    position: relative;
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow: visible;
+}
+
+.workspace-page-tools {
+    display: contents;
 }
 
 .image-text2image-split {
@@ -2128,6 +3148,41 @@ onUnmounted(() => {
 
 .split-pane {
     min-height: 0;
+}
+
+.header-utility-button {
+    border-radius: 999px;
+    font-weight: 500;
+}
+
+.reference-action-toolbar {
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.reference-action-button-wrap {
+    display: inline-flex;
+}
+
+.reference-action-anchor {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.reference-action-thumbnail {
+    width: 40px;
+    height: 40px;
+    overflow: hidden;
+    border-radius: 12px;
+    border: 1px solid var(--n-border-color);
+    background: var(--n-color-embedded);
+    flex-shrink: 0;
+}
+
+.reference-action-status {
+    border-radius: 999px;
 }
 
 .split-divider {
@@ -2172,23 +3227,46 @@ onUnmounted(() => {
 .variant-cell__controls {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 8px;
     min-width: 0;
+    flex-wrap: wrap;
+}
+
+.variant-cell__controls--stacked {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+}
+
+.variant-cell__meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.variant-cell__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1 1 auto;
 }
 
 .variant-cell__label {
     flex-shrink: 0;
 }
 
-.variant-cell__stale {
-    flex-shrink: 0;
+.variant-cell__model {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
-.variant-cell__model {
-    /* 让模型选择不要无限拉伸：保持紧凑，避免把右侧按钮/布局挤散 */
-    flex: 0 1 260px;
-    max-width: 260px;
-    min-width: 0;
+.variant-cell__run {
+    flex-shrink: 0;
 }
 
 .variant-results-wrap {

@@ -15,6 +15,7 @@ import type {
 } from '@prompt-optimizer/core'
 import type { AppServices } from '../../types/services'
 import { useProMultiMessageSession } from '../../stores/session/useProMultiMessageSession'
+import { withHistorySourceBindingMetadata } from '../../utils/history-source-binding'
 
 /**
  * 多轮对话消息优化 Composable 返回值接口
@@ -39,6 +40,7 @@ export interface UseConversationOptimization {
   switchToV0: (version: PromptRecordChain['versions'][number]) => Promise<void>  // 🆕 V0 切换
   applyToConversation: (messageId: string, content: string) => void
   applyCurrentVersion: () => Promise<void>
+  clearContent: () => void
   cleanupDeletedMessageMapping: (messageId: string, options?: { keepSelection?: boolean }) => void
   saveLocalEdit: (payload: { optimizedPrompt: string; note?: string; source?: 'patch' | 'manual' }) => Promise<void>
   restoreFromSessionStore: () => void  // 🔧 Codex 修复：显式恢复函数
@@ -112,6 +114,17 @@ export function useConversationOptimization(
       isSyncingMapToSession.value = true
       proMultiMessageSession.setMessageChainMap(record)
       isSyncingMapToSession.value = false
+    }
+  }
+
+  const saveSessionSnapshot = async (reason: string) => {
+    if (optimizationMode.value !== 'system') return
+
+    try {
+      await proMultiMessageSession.saveSession()
+    } catch (error) {
+      console.error(`[useConversationOptimization] Failed to save session after ${reason}:`, error)
+      toast.warning(t('toast.warning.saveHistoryFailed'))
     }
   }
 
@@ -252,7 +265,7 @@ export function useConversationOptimization(
           if (messageId) {
             restoredMap.set(messageId, value)
             hasMigrated = true
-            console.log(`[ConversationOptimization] 迁移旧格式 key: ${key} → ${messageId}`)
+            console.log(`[ConversationOptimization] Migrated legacy key format: ${key} -> ${messageId}`)
           }
         } else {
           // 新格式 key，直接使用
@@ -264,7 +277,7 @@ export function useConversationOptimization(
 
       // 🔧 如果发生了迁移，立即同步到 session store 以保存新格式
       if (hasMigrated) {
-        console.log('[ConversationOptimization] 检测到旧格式 key，已自动迁移并保存')
+        console.log('[ConversationOptimization] Detected legacy key format; migrated and saved automatically')
         syncMessageChainMapToSession()
       }
     }
@@ -276,6 +289,13 @@ export function useConversationOptimization(
     () => {
       if (optimizationMode.value !== 'system') return
       if (isSyncingMapToSession.value) return
+      if (!proMultiMessageSession.messageChainMap || Object.keys(proMultiMessageSession.messageChainMap).length === 0) {
+        messageChainMap.value = new Map()
+        if (!proMultiMessageSession.chainId && !proMultiMessageSession.versionId) {
+          currentVersions.value = []
+        }
+        return
+      }
       restoreFromSessionStore()
     },
     { immediate: true, flush: 'sync', deep: true }
@@ -319,7 +339,7 @@ export function useConversationOptimization(
       const latest = chain.versions[chain.versions.length - 1]
       return latest ? latest.version : 0
     } catch (error) {
-      console.warn(`[ConversationOptimization] 获取消息 ${messageId} 版本号失败:`, error)
+      console.warn(`[ConversationOptimization] Failed to get the applied version for message ${messageId}:`, error)
       return 0 // 失败时默认 v0
     }
   }
@@ -363,7 +383,7 @@ export function useConversationOptimization(
         optimizedPrompt.value = chain.currentRecord.optimizedPrompt
         currentRecordId.value = chain.currentRecord.id
       } catch (error) {
-        console.error('[ConversationOptimization] 加载工作链失败:', error)
+        console.error('[ConversationOptimization] Failed to load the working chain:', error)
         toast.error(t('toast.error.loadChainFailed'))
         // 重置为首次优化状态
         currentChainId.value = ''
@@ -490,13 +510,13 @@ export function useConversationOptimization(
                   modelKey: selectedOptimizeModel.value,
                   templateId: selectedTemplate.value!.id,
                   timestamp: Date.now(),
-                  metadata: {
+                  metadata: withHistorySourceBindingMetadata({
                     messageId: message.id,
                     messageRole: message.role,
                     optimizationMode: optimizationMode.value,
                     // 🆕 保存完整的会话快照（包含版本信息）
                     conversationSnapshot
-                  }
+                  }, proMultiMessageSession)
               }
 
               const newChain = await historyManager.value.createNewChain(recordData)
@@ -511,6 +531,8 @@ export function useConversationOptimization(
                   syncMessageChainMapToSession()
               }
 
+              await saveSessionSnapshot('optimization commit')
+
               // 触发全局历史记录刷新事件
               if (typeof window !== 'undefined') {
                 window.dispatchEvent(new Event('prompt-optimizer:history-refresh'))
@@ -519,7 +541,7 @@ export function useConversationOptimization(
               // 显示成功提示
               toast.success(t('toast.success.optimizeAndApply', { version: 'v1' }))
             } catch (error) {
-              console.error('[ConversationOptimization] 保存历史记录失败:', error)
+              console.error('[ConversationOptimization] Failed to save history:', error)
               toast.warning(t('toast.warning.saveHistoryFailed'))
               // 优化结果仍然可用，但未保存历史
             } finally {
@@ -527,14 +549,14 @@ export function useConversationOptimization(
             }
           },
           onError: (error: Error) => {
-            console.error('[ConversationOptimization] 优化失败:', error)
+            console.error('[ConversationOptimization] Optimization failed:', error)
             toast.error(getI18nErrorMessage(error, t('toast.error.optimizeFailed')))
             isOptimizing.value = false
           }
         }
       )
     } catch (error) {
-      console.error('[ConversationOptimization] 优化失败:', error)
+      console.error('[ConversationOptimization] Optimization failed:', error)
       toast.error(getI18nErrorMessage(error, t('toast.error.optimizeFailed')))
       isOptimizing.value = false
     }
@@ -642,18 +664,20 @@ export function useConversationOptimization(
                   iterationNote: iterateInput,
                   modelKey: selectedOptimizeModel.value,
                   templateId: templateId,
-                  metadata: {
+                  metadata: withHistorySourceBindingMetadata({
                     messageId: message.id,
                     messageRole: message.role,
                     optimizationMode: optimizationMode.value,
                     // 🆕 迭代时也更新会话快照（包含版本信息）
                     conversationSnapshot
-                  }
+                  }, proMultiMessageSession)
                 }
 
                 const updatedChain = await historyManager.value.addIteration(iterationData)
                 currentVersions.value = updatedChain.versions
                 currentRecordId.value = updatedChain.currentRecord.id
+
+                await saveSessionSnapshot('iteration commit')
 
                 // 触发全局历史记录刷新事件
                 if (typeof window !== 'undefined') {
@@ -665,14 +689,14 @@ export function useConversationOptimization(
                 toast.success(t('toast.success.optimizeAndApply', { version: `v${versionNumber}` }))
 
              } catch (error) {
-               console.error('[ConversationOptimization] 保存迭代历史失败:', error)
+               console.error('[ConversationOptimization] Failed to save iteration history:', error)
                toast.warning(t('toast.warning.saveHistoryFailed'))
              } finally {
                isOptimizing.value = false
              }
           },
           onError: (error: Error) => {
-            console.error('[ConversationOptimization] 迭代失败:', error)
+            console.error('[ConversationOptimization] Iteration failed:', error)
             toast.error(getI18nErrorMessage(error, t('toast.error.iterateFailed')))
             isOptimizing.value = false
           }
@@ -686,7 +710,7 @@ export function useConversationOptimization(
         },
       )
     } catch (error) {
-      console.error('[ConversationOptimization] 迭代失败:', error)
+      console.error('[ConversationOptimization] Iteration failed:', error)
       toast.error(getI18nErrorMessage(error, t('toast.error.iterateFailed')))
       isOptimizing.value = false
     }
@@ -758,6 +782,22 @@ export function useConversationOptimization(
     toast.success(t('toast.success.versionApplied'))
   }
 
+  const clearContent = () => {
+    messageChainMap.value = new Map()
+    currentVersions.value = []
+
+    if (optimizationMode.value === 'system') {
+      proMultiMessageSession.clearContent()
+      return
+    }
+
+    localSelectedMessageId.value = ''
+    localChainId.value = ''
+    localRecordId.value = ''
+    localOptimizedPrompt.value = ''
+    localOptimizedReasoning.value = ''
+  }
+
   /**
    * 清理已删除消息的映射
    * @param messageId 被删除的消息 ID
@@ -767,7 +807,7 @@ export function useConversationOptimization(
 
     const removed = removeMessageMapping(messageId)
     if (removed) {
-      console.log('[ConversationOptimization] 已清理消息映射:', messageId)
+      console.log('[ConversationOptimization] Cleaned up the message mapping:', messageId)
     }
 
     if (selectedMessageId.value === messageId) {
@@ -784,7 +824,7 @@ export function useConversationOptimization(
         optimizedPrompt.value = ''
         optimizedReasoning.value = ''
         currentRecordId.value = ''
-        console.log('[ConversationOptimization] 已清空当前选中状态')
+        console.log('[ConversationOptimization] Cleared the current selection state')
       }
     }
   }
@@ -829,13 +869,13 @@ export function useConversationOptimization(
           modelKey,
           templateId,
           timestamp: Date.now(),
-          metadata: {
+          metadata: withHistorySourceBindingMetadata({
             messageId: message?.id,
             messageRole: message?.role,
             optimizationMode: optimizationMode.value,
             localEdit: true,
             localEditSource: source || 'manual',
-          }
+          }, proMultiMessageSession)
         }
         const newRecord = await historyManager.value.createNewChain(recordData)
         currentChainId.value = newRecord.chainId
@@ -848,6 +888,7 @@ export function useConversationOptimization(
           // ⚠️ Codex 修复：显式同步到 session store
           syncMessageChainMapToSession()
         }
+        await saveSessionSnapshot('local edit commit')
         return
       }
 
@@ -858,19 +899,20 @@ export function useConversationOptimization(
         modelKey,
         templateId,
         iterationNote: note || (source === 'patch' ? 'Direct fix' : 'Manual edit'),
-        metadata: {
+        metadata: withHistorySourceBindingMetadata({
           messageId: message?.id,
           messageRole: message?.role,
           optimizationMode: optimizationMode.value,
           localEdit: true,
           localEditSource: source || 'manual',
-        }
+        }, proMultiMessageSession)
       })
 
       currentVersions.value = updatedChain.versions
       currentRecordId.value = updatedChain.currentRecord.id
+      await saveSessionSnapshot('local edit commit')
     } catch (error: unknown) {
-      console.error('[useConversationOptimization] 保存本地修改失败:', error)
+      console.error('[useConversationOptimization] Failed to save local edits:', error)
       toast.warning(t('toast.warning.saveHistoryFailed'))
     }
   }
@@ -894,6 +936,7 @@ export function useConversationOptimization(
     switchToV0,  // 🆕 V0 切换方法
     applyToConversation,
     applyCurrentVersion,
+    clearContent,
     cleanupDeletedMessageMapping,
     saveLocalEdit,
     restoreFromSessionStore  // 🔧 Codex 修复：显式恢复函数

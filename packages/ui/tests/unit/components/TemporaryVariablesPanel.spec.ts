@@ -355,7 +355,7 @@ describe('TemporaryVariablesPanel', () => {
 
     expect(dialogWarningSpy).toHaveBeenCalledTimes(1)
     const opts = dialogWarningSpy.mock.calls[0]?.[0]
-    expect(String(opts?.content)).toContain('临时变量')
+    expect(String(opts?.content)).toContain('temporary variables')
     expect(String(opts?.content)).toContain('1') // includes count
     expect(fixture.handleClearAllVariables).not.toHaveBeenCalled()
 
@@ -365,6 +365,24 @@ describe('TemporaryVariablesPanel', () => {
 
     expect(fixture.handleClearAllVariables).toHaveBeenCalledTimes(1)
     expect(wrapper.text()).not.toContain('rules')
+  })
+
+  it('空态时只显示一次 No variables detected，不重复显示 0 个临时变量', () => {
+    const fixture = createPanelManagerFixture()
+    fixture.tempVars.value = {}
+
+    const wrapper = mount(TemporaryVariablesPanel, {
+      props: {
+        manager: fixture.manager as any,
+        disabled: false,
+      },
+      global: {
+        stubs: globalStubs,
+      },
+    })
+
+    expect(wrapper.text()).toContain('No variables detected')
+    expect(wrapper.text()).not.toContain('0 temporary variables')
   })
 
   it('行内“更多”选择删除会调用 handleDeleteVariable', async () => {

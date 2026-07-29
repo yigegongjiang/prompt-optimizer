@@ -11,12 +11,20 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { getPiniaServices } from '../../plugins/pinia'
 import { isValidVariableName, sanitizeVariableRecord } from '../../types/variable'
+import { coerceTestPanelVersionValue } from '../../utils/testPanelVersion'
+import {
+  normalizeImageSourceToPayload,
+  persistImagePayloadAsAssetId,
+} from '../../utils/image-asset-storage'
 import {
   isImageRef,
   createImageRef,
   type ImageResult,
-  type IImageStorageService
+  type IImageStorageService,
+  type PromptAssetBinding,
+  type PromptSessionOrigin,
 } from '@prompt-optimizer/core'
+import { createSessionAssetBindingState } from './sessionAssetBinding'
 import {
   IMAGE_IMAGE2IMAGE_SESSION_KEY,
   computeStableImageId,
@@ -34,9 +42,10 @@ type ImageResultItem = ImageResult['images'][number]
  * image 模式测试面板的版本选择：
  * - 0: v0（原始提示词）
  * - >=1: v1..vn（历史链版本号）
- * - 'latest': 跟随最新 vn
+ * - 'workspace': 下方工作区当前内容（未保存草稿也算）
+ * - 'previous': 动态指向最近保存版本的上一版
  */
-export type TestPanelVersionValue = 0 | number | 'latest'
+export type TestPanelVersionValue = 'workspace' | 'previous' | 0 | number
 
 export type TestVariantId = 'a' | 'b' | 'c' | 'd'
 
@@ -51,7 +60,7 @@ export interface ImageWorkspaceLayoutConfig {
 
 export interface TestVariantConfig {
   id: TestVariantId
-  /** 提示词版本（v0 / vN / latest） */
+  /** 提示词版本（workspace / v0 / vN） */
   version: TestPanelVersionValue
   /** 图像模型配置 key（configId） */
   modelKey: string
@@ -92,6 +101,8 @@ export interface ImageImage2ImageSessionState {
   selectedTemplateId: string | null
   selectedIterateTemplateId: string | null
   lastActiveAt: number
+  assetBinding?: PromptAssetBinding
+  origin?: PromptSessionOrigin
 }
 
 /**
@@ -113,9 +124,9 @@ const createDefaultState = (): ImageImage2ImageSessionState => ({
   layout: { mainSplitLeftPct: 50, testColumnCount: 2 },
   testVariants: [
     { id: 'a', version: 0, modelKey: '' },
-    { id: 'b', version: 'latest', modelKey: '' },
-    { id: 'c', version: 'latest', modelKey: '' },
-    { id: 'd', version: 'latest', modelKey: '' },
+    { id: 'b', version: 'workspace', modelKey: '' },
+    { id: 'c', version: 'workspace', modelKey: '' },
+    { id: 'd', version: 'workspace', modelKey: '' },
   ],
   testVariantResults: {
     a: null,
@@ -136,6 +147,8 @@ const createDefaultState = (): ImageImage2ImageSessionState => ({
   selectedTemplateId: null,
   selectedIterateTemplateId: null,
   lastActiveAt: Date.now(),
+  assetBinding: undefined,
+  origin: undefined,
 })
 
 export const useImageImage2ImageSession = defineStore('imageImage2ImageSession', () => {
@@ -157,9 +170,9 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
   const layout = ref<ImageWorkspaceLayoutConfig>({ mainSplitLeftPct: 50, testColumnCount: 2 })
   const testVariants = ref<TestVariantConfig[]>([
     { id: 'a', version: 0, modelKey: '' },
-    { id: 'b', version: 'latest', modelKey: '' },
-    { id: 'c', version: 'latest', modelKey: '' },
-    { id: 'd', version: 'latest', modelKey: '' },
+    { id: 'b', version: 'workspace', modelKey: '' },
+    { id: 'c', version: 'workspace', modelKey: '' },
+    { id: 'd', version: 'workspace', modelKey: '' },
   ])
   const testVariantResults = ref<TestVariantResults>({
     a: null,
@@ -179,6 +192,16 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
   const selectedTemplateId = ref<string | null>(null)
   const selectedIterateTemplateId = ref<string | null>(null)
   const lastActiveAt = ref(Date.now())
+  const assetBindingState = createSessionAssetBindingState(
+    () => {
+      lastActiveAt.value = Date.now()
+    },
+    () => {
+      void saveSession().catch((error) => {
+        console.error('[ImageImage2ImageSession] Failed to auto-save asset binding:', error)
+      })
+    },
+  )
 
   const updatePrompt = (prompt: string) => {
     if (originalPrompt.value === prompt) return
@@ -196,6 +219,10 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     const nextReasoning = payload.reasoning || ''
     const nextChainId = payload.chainId
     const nextVersionId = payload.versionId
+
+    if (!nextChainId && !nextVersionId) {
+      assetBindingState.clearAssetBindingWithoutPersist()
+    }
 
     const changed =
       optimizedPrompt.value !== nextOptimizedPrompt ||
@@ -236,7 +263,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     layout.value = { ...layout.value, testColumnCount: count }
     lastActiveAt.value = Date.now()
     saveSession().catch(error => {
-      console.error('[ImageImage2ImageSession] 自动保存会话失败:', error)
+      console.error('[ImageImage2ImageSession] Failed to auto-save session:', error)
     })
   }
 
@@ -247,7 +274,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     layout.value = { ...layout.value, mainSplitLeftPct: next }
     lastActiveAt.value = Date.now()
     saveSession().catch(error => {
-      console.error('[ImageImage2ImageSession] 自动保存会话失败:', error)
+      console.error('[ImageImage2ImageSession] Failed to auto-save session:', error)
     })
   }
 
@@ -262,7 +289,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     testVariants.value = nextList
     lastActiveAt.value = Date.now()
     saveSession().catch(error => {
-      console.error('[ImageImage2ImageSession] 自动保存会话失败:', error)
+      console.error('[ImageImage2ImageSession] Failed to auto-save session:', error)
     })
   }
 
@@ -285,7 +312,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     selectedTextModelKey.value = modelKey
     lastActiveAt.value = Date.now()
     saveSession().catch(error => {
-      console.error('[ImageImage2ImageSession] 自动保存会话失败:', error)
+      console.error('[ImageImage2ImageSession] Failed to auto-save session:', error)
     })
   }
 
@@ -295,7 +322,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     lastActiveAt.value = Date.now()
     // 异步保存完整状态（best-effort）
     saveSession().catch(error => {
-      console.error('[ImageImage2ImageSession] 自动保存会话失败:', error)
+      console.error('[ImageImage2ImageSession] Failed to auto-save session:', error)
     })
   }
 
@@ -304,7 +331,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     selectedTemplateId.value = templateId
     lastActiveAt.value = Date.now()
     saveSession().catch(error => {
-      console.error('[ImageImage2ImageSession] 自动保存会话失败:', error)
+      console.error('[ImageImage2ImageSession] Failed to auto-save session:', error)
     })
   }
 
@@ -313,7 +340,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     selectedIterateTemplateId.value = templateId
     lastActiveAt.value = Date.now()
     saveSession().catch(error => {
-      console.error('[ImageImage2ImageSession] 自动保存会话失败:', error)
+      console.error('[ImageImage2ImageSession] Failed to auto-save session:', error)
     })
   }
 
@@ -332,6 +359,9 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     }
     temporaryVariables.value[name] = value
     lastActiveAt.value = Date.now()
+    saveSession().catch(error => {
+      console.error('[ImageImage2ImageSession] Failed to auto-save temporary variables:', error)
+    })
   }
 
   const getTemporaryVariable = (name: string): string | undefined => {
@@ -344,11 +374,17 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     if (!Object.prototype.hasOwnProperty.call(temporaryVariables.value, name)) return
     delete temporaryVariables.value[name]
     lastActiveAt.value = Date.now()
+    saveSession().catch(error => {
+      console.error('[ImageImage2ImageSession] Failed to auto-save temporary variables:', error)
+    })
   }
 
   const clearTemporaryVariables = () => {
     temporaryVariables.value = {}
     lastActiveAt.value = Date.now()
+    saveSession().catch(error => {
+      console.error('[ImageImage2ImageSession] Failed to auto-save temporary variables:', error)
+    })
   }
 
   const reset = () => {
@@ -374,7 +410,33 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     selectedImageModelKey.value = defaultState.selectedImageModelKey
     selectedTemplateId.value = defaultState.selectedTemplateId
     selectedIterateTemplateId.value = defaultState.selectedIterateTemplateId
+    assetBindingState.resetAssetBinding()
     lastActiveAt.value = defaultState.lastActiveAt
+  }
+
+  const clearContent = (options: { persist?: boolean } = {}) => {
+    const defaultState = createDefaultState()
+    originalPrompt.value = defaultState.originalPrompt
+    optimizedPrompt.value = defaultState.optimizedPrompt
+    reasoning.value = defaultState.reasoning
+    chainId.value = defaultState.chainId
+    versionId.value = defaultState.versionId
+    temporaryVariables.value = defaultState.temporaryVariables
+    inputImageB64.value = defaultState.inputImageB64
+    inputImageId.value = defaultState.inputImageId
+    inputImageMime.value = defaultState.inputImageMime
+    originalImageResult.value = defaultState.originalImageResult
+    optimizedImageResult.value = defaultState.optimizedImageResult
+    testVariantResults.value = defaultState.testVariantResults
+    testVariantLastRunFingerprint.value = defaultState.testVariantLastRunFingerprint
+    evaluationResults.value = defaultState.evaluationResults
+    assetBindingState.clearAssetBindingWithoutPersist()
+    lastActiveAt.value = Date.now()
+    if (options.persist !== false) {
+      void saveSession().catch((error) => {
+        console.error('[ImageImage2ImageSession] Failed to persist cleared content:', error)
+      })
+    }
   }
 
   /**
@@ -398,36 +460,37 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
         continue
       }
 
-      // 如果有 base64 数据，保存到存储服务并创建引用
-      if (img.b64) {
-        const mimeType = img.mimeType || 'image/png'
-        const imageId = await computeStableImageId(img.b64, mimeType)
+      const payload = img.b64
+        ? {
+            b64: img.b64,
+            mimeType: img.mimeType || 'image/png',
+          }
+        : img.url
+          ? await normalizeImageSourceToPayload(img.url)
+          : null
 
-        const existing = await storageService.getMetadata(imageId)
-        if (!existing) {
-          await storageService.saveImage({
-            metadata: {
-              id: imageId,
-              mimeType,
-              sizeBytes: Math.floor(img.b64.length * 0.75),
-              createdAt: Date.now(),
-              accessedAt: Date.now(),
-              source: 'generated',
-              metadata: {
-                prompt: result.metadata?.prompt,
-                modelId: result.metadata?.modelId,
-                configId: result.metadata?.configId
-              }
-            },
-            data: img.b64
-          })
-        }
-
-        processedImages.push(createImageRef(imageId))
-      } else {
-        // URL 或其他格式，直接保留
+      if (!payload) {
         processedImages.push(img)
+        continue
       }
+
+      const imageId = await persistImagePayloadAsAssetId({
+        payload,
+        storageService,
+        sourceType: 'generated',
+        metadata: {
+          prompt: result.metadata?.prompt,
+          modelId: result.metadata?.modelId,
+          configId: result.metadata?.configId,
+        },
+      })
+
+      if (imageId) {
+        processedImages.push(createImageRef(imageId))
+        continue
+      }
+
+      processedImages.push(img)
     }
 
     return {
@@ -460,16 +523,46 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
               mimeType: fullImageData.metadata.mimeType
             })
           } else {
-            console.warn(`[ImageImage2ImageSession] 图像 ${img.id} 未找到`)
+            console.warn(`[ImageImage2ImageSession] Image ${img.id} was not found`)
             // 图像未找到，保留引用（UI 会显示错误）
             loadedImages.push(img)
           }
         } catch (error) {
-          console.error(`[ImageImage2ImageSession] 加载图像 ${img.id} 失败:`, error)
+          console.error(`[ImageImage2ImageSession] Failed to load image ${img.id}:`, error)
           // 加载失败，保留引用
           loadedImages.push(img)
         }
       } else {
+        if (img.url && !img.b64) {
+          try {
+            const payload = await normalizeImageSourceToPayload(img.url)
+            if (payload?.b64) {
+              try {
+                await persistImagePayloadAsAssetId({
+                  payload,
+                  storageService,
+                  sourceType: 'generated',
+                  metadata: {
+                    prompt: result.metadata?.prompt,
+                    modelId: result.metadata?.modelId,
+                    configId: result.metadata?.configId,
+                  },
+                })
+              } catch (error) {
+                console.warn('[ImageImage2ImageSession] Failed to persist legacy URL image during restore:', error)
+              }
+
+              loadedImages.push({
+                b64: payload.b64,
+                mimeType: payload.mimeType,
+              })
+              continue
+            }
+          } catch (error) {
+            console.warn('[ImageImage2ImageSession] Failed to restore legacy URL image:', error)
+          }
+        }
+
         // 非引用格式（URL 或 base64），直接保留
         loadedImages.push(img)
       }
@@ -514,10 +607,10 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     return await queueImageStorageMaintenance(async () => {
       const $services = getPiniaServices()
       if (!$services?.preferenceService) {
-        throw new Error('[ImageImage2ImageSession] PreferenceService 不可用，无法保存会话')
+        throw new Error('[ImageImage2ImageSession] PreferenceService is unavailable; cannot save session')
       }
       if (!$services?.imageStorageService) {
-        throw new Error('[ImageImage2ImageSession] ImageStorageService 不可用，无法保存会话')
+        throw new Error('[ImageImage2ImageSession] ImageStorageService is unavailable; cannot save session')
       }
 
       // 准备保存的数据
@@ -579,6 +672,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
         selectedTemplateId: selectedTemplateId.value,
         selectedIterateTemplateId: selectedIterateTemplateId.value,
         lastActiveAt: lastActiveAt.value,
+        ...assetBindingState.persistedAssetBinding(),
       }
 
       await $services.preferenceService.set(IMAGE_IMAGE2IMAGE_SESSION_KEY, snapshot)
@@ -589,10 +683,10 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
   const restoreSession = async () => {
     const $services = getPiniaServices()
     if (!$services?.preferenceService) {
-      throw new Error('[ImageImage2ImageSession] PreferenceService 不可用，无法恢复会话')
+      throw new Error('[ImageImage2ImageSession] PreferenceService is unavailable; cannot restore session')
     }
     if (!$services?.imageStorageService) {
-      throw new Error('[ImageImage2ImageSession] ImageStorageService 不可用，无法恢复会话')
+      throw new Error('[ImageImage2ImageSession] ImageStorageService is unavailable; cannot restore session')
     }
 
     try {
@@ -618,7 +712,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
               inputImageB64Loaded = fullImageData.data
             }
           } catch (error) {
-            console.error(`[ImageImage2ImageSession] 加载输入图像失败:`, error)
+            console.error('[ImageImage2ImageSession] Failed to load input image:', error)
           }
         } else {
           // 向后兼容：如果有 base64 数据，直接使用
@@ -650,10 +744,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
           const byId = new Map<TestVariantId, TestVariantConfig>()
 
           const normalizeVersion = (v: unknown): TestPanelVersionValue => {
-            if (v === 0) return 0
-            if (v === 'latest') return 'latest'
-            if (typeof v === 'number' && Number.isFinite(v) && v >= 1) return v
-            return 'latest'
+            return coerceTestPanelVersionValue(v) ?? 'workspace'
           }
 
           for (const item of rawVariants) {
@@ -748,6 +839,7 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
          selectedImageModelKey.value = typeof parsed.selectedImageModelKey === 'string' ? parsed.selectedImageModelKey : ''
          selectedTemplateId.value = typeof parsed.selectedTemplateId === 'string' ? parsed.selectedTemplateId : null
           selectedIterateTemplateId.value = typeof parsed.selectedIterateTemplateId === 'string' ? parsed.selectedIterateTemplateId : null
+          assetBindingState.restoreAssetBinding(parsed)
           lastActiveAt.value = Date.now()
 
           // 如果 variants 的 modelKey 为空，尝试用 legacy selectedImageModelKey 填充一次
@@ -796,6 +888,8 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     selectedTemplateId,
     selectedIterateTemplateId,
     lastActiveAt,
+    assetBinding: assetBindingState.assetBinding,
+    origin: assetBindingState.origin,
 
     // ========== 更新方法 ==========
     updatePrompt,
@@ -819,6 +913,9 @@ export const useImageImage2ImageSession = defineStore('imageImage2ImageSession',
     deleteTemporaryVariable,
     clearTemporaryVariables,
 
+    clearContent,
+    updateAssetBinding: assetBindingState.updateAssetBinding,
+    clearAssetBinding: assetBindingState.clearAssetBinding,
     reset,
 
     // ========== 持久化方法 ==========

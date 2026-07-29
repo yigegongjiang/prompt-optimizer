@@ -11,6 +11,8 @@ import { ImageError } from '../errors'
 import { IMAGE_ERROR_CODES } from '../../../constants/error-codes'
 
 export class OpenAIImageAdapter extends AbstractImageProviderAdapter {
+  private static readonly FORCED_SINGLE_OUTPUT_PARAM_KEYS = ['n', 'batch_size', 'outputMimeType', 'response_format']
+
   protected normalizeBaseUrl(base: string): string {
     const trimmed = base.replace(/\/$/, '')
     return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`
@@ -19,10 +21,10 @@ export class OpenAIImageAdapter extends AbstractImageProviderAdapter {
     return {
       id: 'openai',
       name: 'OpenAI',
-      description: 'OpenAI GPT Image 图像生成服务',
+      description: 'OpenAI GPT Image generation service',
       requiresApiKey: true,
       defaultBaseURL: 'https://api.openai.com/v1',
-      supportsDynamicModels: false,
+      supportsDynamicModels: true,
       apiKeyUrl: 'https://platform.openai.com/api-keys',
       connectionSchema: {
         required: ['apiKey'],
@@ -38,14 +40,14 @@ export class OpenAIImageAdapter extends AbstractImageProviderAdapter {
   getModels(): ImageModel[] {
     return [
       {
-        id: 'gpt-image-1',
-        name: 'GPT Image 1',
-        description: 'OpenAI GPT Image 1 多功能图像生成模型，支持文生图和图像编辑',
+        id: 'gpt-image-2',
+        name: 'GPT Image 2',
+        description: 'OpenAI GPT Image 2 image generation model with text-to-image and image editing support',
         providerId: 'openai',
         capabilities: {
           text2image: true,
           image2image: true,
-          multiImage: false
+          multiImage: true
         },
         parameterDefinitions: [
           {
@@ -80,6 +82,44 @@ export class OpenAIImageAdapter extends AbstractImageProviderAdapter {
         }
       }
     ]
+  }
+
+  public async getModelsAsync(connectionConfig: Record<string, any>): Promise<ImageModel[]> {
+    const baseURL = connectionConfig?.baseURL || this.getProvider().defaultBaseURL
+    const url = `${this.normalizeBaseUrl(baseURL)}/models`
+    const apiKey = connectionConfig?.apiKey
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {})
+        }
+      })
+
+      if (!response.ok) {
+        console.warn(`OpenAI models API error: ${response.status}`)
+        return this.getModels()
+      }
+
+      const data = await response.json()
+      const rawModels = Array.isArray(data?.data)
+        ? data.data
+        : Array.isArray(data)
+          ? data
+          : []
+
+      const models = rawModels
+        .map((model: any) => this.toDynamicModel(model))
+        .filter((model: ImageModel | null): model is ImageModel => !!model)
+        .sort((a: ImageModel, b: ImageModel) => Number(this.isImageModelHint(b)) - Number(this.isImageModelHint(a)))
+
+      return models.length > 0 ? models : this.getModels()
+    } catch (error) {
+      console.warn('Failed to fetch OpenAI models:', error)
+      return this.getModels()
+    }
   }
 
   protected getTestImageRequest(testType: 'text2image' | 'image2image'): Omit<ImageRequest, 'configId'> {
@@ -142,12 +182,43 @@ export class OpenAIImageAdapter extends AbstractImageProviderAdapter {
     }
   }
 
-  protected async doGenerate(request: ImageRequest, config: ImageModelConfig): Promise<ImageResult> {
-    const hasInputImage = !!request.inputImage
+  private toDynamicModel(model: any): ImageModel | null {
+    const id = typeof model === 'string' ? model : model?.id
+    if (!id || typeof id !== 'string') {
+      return null
+    }
 
-    if (hasInputImage) {
+    const name = typeof model?.name === 'string' ? model.name : id
+    const description = typeof model?.description === 'string'
+      ? model.description
+      : `${name} model`
+
+    return {
+      id,
+      name,
+      description,
+      providerId: 'openai',
+      capabilities: {
+        text2image: true,
+        image2image: true,
+        multiImage: true
+      },
+      parameterDefinitions: this.getParameterDefinitions(id),
+      defaultParameterValues: this.getDefaultParameterValues(id)
+    }
+  }
+
+  private isImageModelHint(model: ImageModel): boolean {
+    const text = `${model.id} ${model.name} ${model.description || ''}`.toLowerCase()
+    return text.includes('image')
+  }
+
+  protected async doGenerate(request: ImageRequest, config: ImageModelConfig): Promise<ImageResult> {
+    const inputImages = this.getEditInputImages(request)
+
+    if (inputImages.length > 0) {
       // 图像编辑模式：使用 /images/edits 端点
-      return await this.generateImageEdit(request, config)
+      return await this.generateImageEdit(request, config, inputImages)
     } else {
       // 文生图模式：使用 /images/generations 端点
       return await this.generateImage(request, config)
@@ -158,16 +229,11 @@ export class OpenAIImageAdapter extends AbstractImageProviderAdapter {
     const merged: Record<string, any> = {
       model: config.modelId,
       prompt: request.prompt,
-      response_format: 'b64_json',
       output_format: 'png', // 固定为png
       stream: false,
       // 合并参数覆盖（先合并，后强制覆盖）
-      ...config.paramOverrides,
-      ...request.paramOverrides
+      ...this.getOpenAIParamOverrides(request, config)
     }
-    // 隐藏并固定多图相关参数
-    delete (merged as any).n
-    delete (merged as any).batch_size
     const payload = { ...merged, n: 1 }
 
     const response = await this.apiCall(config, '/images/generations', {
@@ -182,8 +248,12 @@ export class OpenAIImageAdapter extends AbstractImageProviderAdapter {
     return this.parseImageResponse(response, config)
   }
 
-  private async generateImageEdit(request: ImageRequest, config: ImageModelConfig): Promise<ImageResult> {
-    if (!request.inputImage) {
+  private async generateImageEdit(
+    request: ImageRequest,
+    config: ImageModelConfig,
+    inputImages: NonNullable<ImageRequest['inputImages']>
+  ): Promise<ImageResult> {
+    if (inputImages.length === 0) {
       throw new ImageError(IMAGE_ERROR_CODES.IMAGE2IMAGE_INPUT_IMAGE_REQUIRED)
     }
 
@@ -191,28 +261,25 @@ export class OpenAIImageAdapter extends AbstractImageProviderAdapter {
     const formData = new FormData()
     formData.append('model', config.modelId)
     formData.append('prompt', request.prompt)
-    formData.append('response_format', 'b64_json')
     formData.append('output_format', 'png') // 固定为png
 
-    // 添加参数覆盖（隐藏多图相关参数）
-    const allParams: Record<string, any> = { ...config.paramOverrides, ...request.paramOverrides }
-    delete allParams.n
-    delete allParams.batch_size
+    // 添加参数覆盖（隐藏结果数量与 UI 内部参数）
+    const allParams = this.getOpenAIParamOverrides(request, config)
     for (const [key, value] of Object.entries(allParams)) {
       if (value !== undefined && value !== null) {
         formData.append(key, String(value))
       }
     }
 
-    // 固定单图
+    // 固定生成一张结果图
     formData.append('n', '1')
 
-    // 转换base64图像为Blob
-    const imageBlob = this.base64ToBlob(
-      request.inputImage.b64 || '',
-      request.inputImage.mimeType || 'image/png'
-    )
-    formData.append('image', imageBlob, 'input.png')
+    const imageFieldName = inputImages.length > 1 ? 'image[]' : 'image'
+    inputImages.forEach((inputImage, index) => {
+      const mimeType = inputImage.mimeType || 'image/png'
+      const imageBlob = this.base64ToBlob(inputImage.b64 || '', mimeType)
+      formData.append(imageFieldName, imageBlob, `input-${index + 1}.${this.getFileExtension(mimeType)}`)
+    })
 
     const response = await this.apiCall(config, '/images/edits', {
       method: 'POST',
@@ -226,24 +293,57 @@ export class OpenAIImageAdapter extends AbstractImageProviderAdapter {
     return this.parseImageResponse(response, config)
   }
 
+  private getEditInputImages(request: ImageRequest): NonNullable<ImageRequest['inputImages']> {
+    if (Array.isArray(request.inputImages) && request.inputImages.length > 0) {
+      return request.inputImages
+    }
+
+    return request.inputImage ? [request.inputImage] : []
+  }
+
+  private getOpenAIParamOverrides(
+    request: ImageRequest,
+    config: ImageModelConfig
+  ): Record<string, any> {
+    const params: Record<string, any> = { ...config.paramOverrides, ...request.paramOverrides }
+    for (const key of OpenAIImageAdapter.FORCED_SINGLE_OUTPUT_PARAM_KEYS) {
+      delete params[key]
+    }
+    return params
+  }
+
+  private getFileExtension(mimeType: string): string {
+    const normalized = mimeType.toLowerCase()
+    if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg'
+    if (normalized.includes('webp')) return 'webp'
+    return 'png'
+  }
+
   private parseImageResponse(response: any, config: ImageModelConfig): ImageResult {
     if (!response.data || !Array.isArray(response.data)) {
       throw new ImageError(IMAGE_ERROR_CODES.INVALID_RESPONSE_FORMAT)
     }
 
     const images = response.data.map((item: any) => {
-      if (!item.b64_json) {
+      if (item.b64_json) {
+        // GPT Image 系列默认返回 base64；无需发送已废弃的 response_format 参数。
+        const dataUrl = `data:image/png;base64,${item.b64_json}`
+
+        return {
+          b64: item.b64_json,
+          mimeType: 'image/png',
+          url: dataUrl
+        }
+      }
+
+      if (item.url) {
+        return {
+          url: item.url,
+          mimeType: 'image/png'
+        }
+      }
+
         throw new ImageError(IMAGE_ERROR_CODES.INVALID_RESPONSE_FORMAT)
-      }
-
-      // 构建 data URL
-      const dataUrl = `data:image/png;base64,${item.b64_json}`
-
-      return {
-        b64: item.b64_json,
-        mimeType: 'image/png',
-        url: dataUrl
-      }
     })
 
     return {

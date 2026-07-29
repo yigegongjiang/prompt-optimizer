@@ -2,31 +2,71 @@ import type { TextModelConfig } from './types';
 import type { ITextAdapterRegistry } from '../llm/types';
 import { TextAdapterRegistry } from '../llm/adapters/registry';
 import { getEnvVar } from '../../utils/environment';
+import { normalizeCustomRequestHeaders, validateCustomRequestHeaders } from '../../utils/custom-request-headers';
 import { generateDynamicModels } from './model-utils';
+import { CHROME_BUILT_IN_PROVIDER_ID } from '../llm/chrome-built-in';
 
 /**
  * Provider ID -> 环境变量 key 映射
  * 新增 Provider 只需在此添加一行
  */
 const PROVIDER_ENV_KEYS = {
-  openai: 'VITE_OPENAI_API_KEY',
-  gemini: 'VITE_GEMINI_API_KEY',
-  anthropic: 'VITE_ANTHROPIC_API_KEY',
-  deepseek: 'VITE_DEEPSEEK_API_KEY',
-  siliconflow: 'VITE_SILICONFLOW_API_KEY',
-  zhipu: 'VITE_ZHIPU_API_KEY',
-  dashscope: 'VITE_DASHSCOPE_API_KEY',
-  openrouter: 'VITE_OPENROUTER_API_KEY',
-  modelscope: 'VITE_MODELSCOPE_API_KEY',
-  minimax: 'VITE_MINIMAX_API_KEY'
+  openai: ['VITE_OPENAI_API_KEY'],
+  gemini: ['VITE_GEMINI_API_KEY'],
+  anthropic: ['VITE_ANTHROPIC_API_KEY'],
+  deepseek: ['VITE_DEEPSEEK_API_KEY'],
+  siliconflow: ['VITE_SILICONFLOW_API_KEY'],
+  zhipu: ['VITE_ZHIPU_API_KEY'],
+  dashscope: ['VITE_DASHSCOPE_API_KEY'],
+  openrouter: ['VITE_OPENROUTER_API_KEY'],
+  modelscope: ['VITE_MODELSCOPE_API_KEY'],
+  ollama: [],
+  minimax: ['VITE_MINIMAX_API_KEY'],
+  cloudflare: ['VITE_CF_API_TOKEN'],
+  grok: ['VITE_GROK_API_KEY', 'VITE_XAI_API_KEY'],
+  'xiaomi-mimo-token-plan': ['VITE_MIMO_TOKEN_PLAN_API_KEY']
 } as const;
+
+const PROVIDER_EXTRA_CONNECTION_ENV_KEYS: Record<string, Record<string, string[]>> = {
+  cloudflare: {
+    accountId: ['VITE_CF_ACCOUNT_ID']
+  },
+  'xiaomi-mimo-token-plan': {
+    baseURL: ['VITE_MIMO_TOKEN_PLAN_API_BASE_URL']
+  }
+};
+
+const PROVIDER_REQUIRED_CONNECTION_FIELDS: Record<string, string[]> = {
+  ollama: [],
+  cloudflare: ['apiKey', 'accountId']
+};
+
+function getFirstEnvValue(envKeys: readonly string[]): string {
+  for (const envKey of envKeys) {
+    const value = getEnvVar(envKey).trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function hasConnectionValue(value: unknown): boolean {
+  return typeof value === 'string' ? value.trim().length > 0 : !!value;
+}
+
+function shouldEnableFromRequiredFields(
+  connectionConfig: Record<string, unknown>,
+  requiredConnectionFields: readonly string[]
+): boolean {
+  return requiredConnectionFields.length > 0
+    && requiredConnectionFields.every((field) => hasConnectionValue(connectionConfig[field]));
+}
 
 /**
  * 获取所有内置模型的 ID 列表
  * 包括 PROVIDER_ENV_KEYS 中的所有 Provider 和 'custom'
  */
 export function getBuiltinModelIds(): string[] {
-  return [...Object.keys(PROVIDER_ENV_KEYS), 'custom'];
+  return [...Object.keys(PROVIDER_ENV_KEYS), CHROME_BUILT_IN_PROVIDER_ID, 'custom'];
 }
 
 /**
@@ -43,53 +83,117 @@ export function getDefaultTextModels(registry?: ITextAdapterRegistry): Record<st
   const result: Record<string, TextModelConfig> = {};
 
   // 批量生成标准 Provider 配置
-  for (const [providerId, envKey] of Object.entries(PROVIDER_ENV_KEYS)) {
+  for (const [providerId, envKeys] of Object.entries(PROVIDER_ENV_KEYS)) {
     const adapter = adapterRegistry.getAdapter(providerId);
     const provider = adapter.getProvider();
     const models = adapter.getModels();
     const defaultModel = models[0] || adapter.buildDefaultModel(providerId);
-    const apiKey = getEnvVar(envKey).trim();
+    const apiKey = getFirstEnvValue(envKeys);
+    const connectionConfig: Record<string, unknown> = {
+      apiKey,
+      baseURL: provider.defaultBaseURL
+    };
+
+    const extraConnectionFields = PROVIDER_EXTRA_CONNECTION_ENV_KEYS[providerId] || {};
+    for (const [field, fieldEnvKeys] of Object.entries(extraConnectionFields)) {
+      const envValue = getFirstEnvValue(fieldEnvKeys);
+      if (field === 'baseURL' && !envValue) {
+        continue;
+      }
+      connectionConfig[field] = envValue;
+    }
 
     // 使用模型的默认参数值初始化 paramOverrides
     const defaultParamValues = defaultModel.defaultParameterValues || {};
+    const requiredConnectionFields = PROVIDER_REQUIRED_CONNECTION_FIELDS[providerId] || ['apiKey'];
+    const enabled = shouldEnableFromRequiredFields(connectionConfig, requiredConnectionFields);
 
     result[providerId] = {
       id: provider.id,
       name: provider.name,
-      enabled: !!apiKey,
+      enabled: enabled,
+      providerId: provider.id,
+      modelId: defaultModel.id,
       providerMeta: provider,
       modelMeta: defaultModel,
-      connectionConfig: {
-        apiKey,
-        baseURL: provider.defaultBaseURL
-      },
+      connectionConfig,
       paramOverrides: { ...defaultParamValues },
       customParamOverrides: {}
     };
   }
 
   // Custom 单独处理（baseURL 和 model 来自环境变量）
-  const openaiAdapter = adapterRegistry.getAdapter('openai');
+  const openaiCompatibleAdapter = adapterRegistry.getAdapter('openai-compatible');
   const customApiKey = getEnvVar('VITE_CUSTOM_API_KEY').trim();
-  const customBaseURL = getEnvVar('VITE_CUSTOM_API_BASE_URL');
-  const customModelId = getEnvVar('VITE_CUSTOM_API_MODEL') || 'custom-model';
+  const customBaseURL = getEnvVar('VITE_CUSTOM_API_BASE_URL').trim();
+  const rawCustomModelId = getEnvVar('VITE_CUSTOM_API_MODEL').trim();
+  const customModelId = rawCustomModelId || 'custom-model';
+  const rawCustomHeaders = getEnvVar('VITE_CUSTOM_API_HEADERS');
+  const hasExplicitCustomConfig = [
+    customApiKey,
+    customBaseURL,
+    rawCustomModelId,
+    rawCustomHeaders
+  ].some((value) => value.trim().length > 0);
+  let customHeaders: Record<string, string> | undefined;
+  if (rawCustomHeaders) {
+    try {
+      const parsedHeaders = JSON.parse(rawCustomHeaders);
+      const validation = validateCustomRequestHeaders(parsedHeaders as any);
+      if (validation.valid) {
+        customHeaders = normalizeCustomRequestHeaders(parsedHeaders as any);
+      } else {
+        console.warn(
+          `[getDefaultTextModels] Ignored invalid VITE_CUSTOM_API_HEADERS: ${validation.errors
+            .map(error => `${error.key} (${error.reason})`)
+            .join(', ')}`
+        );
+      }
+    } catch (error) {
+      console.warn('[getDefaultTextModels] Failed to parse VITE_CUSTOM_API_HEADERS:', error);
+    }
+  }
   const customModelMeta = {
-    ...openaiAdapter.buildDefaultModel(customModelId),
+    ...openaiCompatibleAdapter.buildDefaultModel(customModelId),
     name: customModelId,
     description: 'Custom model via OpenAI-compatible API'
   };
 
   result.custom = {
     id: 'custom',
-    name: 'Custom',
-    enabled: !!customApiKey,
-    providerMeta: openaiAdapter.getProvider(),
+    name: 'OpenAI Compatible (Custom)',
+    enabled: hasExplicitCustomConfig,
+    providerId: 'openai-compatible',
+    modelId: customModelMeta.id,
+    providerMeta: openaiCompatibleAdapter.getProvider(),
     modelMeta: customModelMeta,
     connectionConfig: {
       apiKey: customApiKey,
-      baseURL: customBaseURL || 'http://localhost:11434/v1'
+      baseURL: customBaseURL || 'http://localhost:11434/v1',
+      requestStyle: 'chat_completions',
+      ...(customHeaders ? { customHeaders } : {})
     },
     paramOverrides: { ...(customModelMeta.defaultParameterValues || {}) },
+    customParamOverrides: {}
+  };
+
+  const chromeBuiltInAdapter = adapterRegistry.getAdapter(CHROME_BUILT_IN_PROVIDER_ID);
+  const chromeBuiltInProvider = chromeBuiltInAdapter.getProvider();
+  const chromeBuiltInModel = chromeBuiltInAdapter.getModels()[0] || chromeBuiltInAdapter.buildDefaultModel('gemini-nano');
+
+  result[CHROME_BUILT_IN_PROVIDER_ID] = {
+    id: CHROME_BUILT_IN_PROVIDER_ID,
+    name: chromeBuiltInProvider.name,
+    enabled: false,
+    activationState: {
+      userConfigured: false
+    },
+    providerId: chromeBuiltInProvider.id,
+    modelId: chromeBuiltInModel.id,
+    providerMeta: chromeBuiltInProvider,
+    modelMeta: chromeBuiltInModel,
+    connectionConfig: {},
+    paramOverrides: { ...(chromeBuiltInModel.defaultParameterValues || {}) },
     customParamOverrides: {}
   };
 

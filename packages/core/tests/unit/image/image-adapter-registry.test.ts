@@ -3,6 +3,7 @@ import { ImageAdapterRegistry } from '../../../src/services/image/adapters/regis
 
 describe('ImageAdapterRegistry', () => {
   const registry = new ImageAdapterRegistry()
+  const cjkPattern = /[\u4e00-\u9fff]/
 
   it('should return available providers', () => {
     const providers = registry.getAllProviders()
@@ -17,6 +18,8 @@ describe('ImageAdapterRegistry', () => {
     expect(providerIds).toContain('seedream')
     expect(providerIds).toContain('siliconflow')
     expect(providerIds).toContain('ollama')
+    expect(providerIds).toContain('cloudflare')
+    expect(providerIds).toContain('grok')
   })
 
   it('should return providers with correct structure', () => {
@@ -89,6 +92,20 @@ describe('ImageAdapterRegistry', () => {
       expect(item).toHaveProperty('provider')
       expect(item).toHaveProperty('model')
       expect(item.model.providerId).toBe(item.provider.id)
+    })
+  })
+
+  it('should keep static provider and model display metadata in English', () => {
+    const providers = registry.getAllProviders()
+
+    providers.forEach(provider => {
+      expect(provider.name).not.toMatch(cjkPattern)
+      expect(provider.description || '').not.toMatch(cjkPattern)
+    })
+
+    registry.getAllStaticModels().forEach(({ model }) => {
+      expect(model.name).not.toMatch(cjkPattern)
+      expect(model.description || '').not.toMatch(cjkPattern)
     })
   })
 

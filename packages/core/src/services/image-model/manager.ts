@@ -1,6 +1,7 @@
 import {
   IImageModelManager,
   ImageModelConfig,
+  ImageModelConfigInput,
   IImageAdapterRegistry
 } from '../image/types'
 import { IStorageProvider } from '../storage/types'
@@ -80,19 +81,38 @@ export class ImageModelManager implements IImageModelManager {
           data[key] = cfg
           changed = true
         } else {
-          // 检查是否需要自动注入 apiKey 并启用内置模型
           const existingConfig = data[key]
-          if (this.shouldAutoEnableBuiltinModel(key, existingConfig, cfg)) {
+          const backfillableFields = this.getBackfillableBuiltinConnectionFields(
+            key,
+            existingConfig,
+            cfg
+          )
+          const shouldAutoEnable = this.shouldAutoEnableBuiltinModel(
+            key,
+            existingConfig,
+            cfg,
+            backfillableFields
+          )
+
+          if (backfillableFields.length > 0 || shouldAutoEnable) {
+            const nextConnectionConfig = {
+              ...(existingConfig.connectionConfig || {})
+            }
+            for (const field of backfillableFields) {
+              nextConnectionConfig[field] = cfg.connectionConfig?.[field]
+            }
+
             data[key] = {
               ...existingConfig,
-              connectionConfig: {
-                ...(existingConfig.connectionConfig || {}),
-                apiKey: cfg.connectionConfig?.apiKey
-              },
-              enabled: true
+              connectionConfig: nextConnectionConfig,
+              enabled: shouldAutoEnable ? true : existingConfig.enabled
             }
             changed = true
-            console.log(`[ImageModelManager] Auto-enabled builtin model with new API key: ${key}`)
+            if (shouldAutoEnable) {
+              console.log(`[ImageModelManager] Auto-enabled builtin model with new connection fields: ${key}`)
+            } else {
+              console.log(`[ImageModelManager] Backfilled missing connection fields for builtin model: ${key}`)
+            }
           }
         }
       }
@@ -111,7 +131,7 @@ export class ImageModelManager implements IImageModelManager {
 
   // === 配置 CRUD 操作 ===
 
-  async addConfig(config: ImageModelConfig): Promise<void> {
+  async addConfig(config: ImageModelConfigInput): Promise<void> {
     // 确保配置是自包含的
     const completeConfig = this.ensureSelfContained(config)
     this.validateConfig(completeConfig)
@@ -138,7 +158,7 @@ export class ImageModelManager implements IImageModelManager {
     )
   }
 
-  async updateConfig(id: string, updates: Partial<ImageModelConfig>): Promise<void> {
+  async updateConfig(id: string, updates: Partial<ImageModelConfigInput>): Promise<void> {
     await this.storage.updateData<Record<string, ImageModelConfig>>(
       this.storageKey,
       (current) => {
@@ -279,21 +299,22 @@ export class ImageModelManager implements IImageModelManager {
       )
     }
 
-    const configs = data as ImageModelConfig[]
-    const failed: { config: ImageModelConfig, error: Error }[] = []
+    const configs = data as ImageModelConfigInput[]
+    const failed: { config: ImageModelConfigInput, error: Error }[] = []
 
     for (const config of configs) {
       try {
-        this.validateConfig(config)
+        const completeConfig = this.ensureSelfContained(config)
+        this.validateConfig(completeConfig)
 
         // 检查是否已存在
-        const existing = await this.getConfig(config.id)
+        const existing = await this.getConfig(completeConfig.id)
         if (existing) {
           // 更新现有配置
-          await this.updateConfig(config.id, config)
+          await this.updateConfig(completeConfig.id, completeConfig)
         } else {
           // 添加新配置
-          await this.addConfig(config)
+          await this.addConfig(completeConfig)
         }
       } catch (error) {
         failed.push({ config, error: error as Error })
@@ -317,7 +338,7 @@ export class ImageModelManager implements IImageModelManager {
 
     return data.every(item => {
       try {
-        this.validateConfig(item)
+        this.validateConfig(this.ensureSelfContained(item))
         return true
       } catch {
         return false
@@ -348,84 +369,104 @@ export class ImageModelManager implements IImageModelManager {
     }
   }
 
+  private getConfigIdentity(config: ImageModelConfigInput): { providerId: string, modelId: string } {
+    const providerId = config.providerId || config.provider?.id || config.model?.providerId
+    const modelId = config.modelId || config.model?.id
+
+    if (!providerId || !modelId) {
+      throw new ImageModelManagerError(
+        IMAGE_ERROR_CODES.CONFIG_INVALID,
+        'Missing provider/model identity',
+        { details: 'Missing providerId/modelId' },
+      )
+    }
+
+    return { providerId, modelId }
+  }
+
   // 确保配置是自包含的（包含完整的provider和model信息）
-  private ensureSelfContained(config: ImageModelConfig): ImageModelConfig {
-    // 如果已经有完整的自包含字段，尽量补齐新增的 provider 字段（保持向后兼容）
-    if (config.provider && config.model) {
-      const providerId = (config.provider.id || config.providerId || '').toLowerCase()
+  private ensureSelfContained(config: ImageModelConfigInput): ImageModelConfig {
+    let identity: { providerId: string, modelId: string }
+
+    try {
+      identity = this.getConfigIdentity(config)
+    } catch (error) {
+      console.warn(`[ImageModelManager] Cannot infer identity for config ${config.id}, marking as disabled:`, error)
+      identity = {
+        providerId: config.provider?.id || config.model?.providerId || 'unknown',
+        modelId: config.model?.id || 'unknown'
+      }
+    }
+
+    const baseConfig = {
+      ...config,
+      providerId: identity.providerId,
+      modelId: identity.modelId,
+      paramOverrides: config.paramOverrides ?? {}
+    }
+
+    try {
+      const adapter = this.registry.getAdapter(identity.providerId)
+      const latestProvider = adapter.getProvider()
+      const latestStaticModel = this.registry
+        .getStaticModels(identity.providerId)
+        .find(model => model.id === identity.modelId)
+      const storedModelMatchesIdentity =
+        config.model?.id === identity.modelId &&
+        config.model.providerId === identity.providerId
+      const resolvedModel = latestStaticModel
+        ? {
+            ...(storedModelMatchesIdentity ? config.model : {}),
+            ...latestStaticModel
+          }
+        : storedModelMatchesIdentity && config.model
+          ? config.model
+          : adapter.buildDefaultModel(identity.modelId)
+
+      let completeConfig: ImageModelConfig = {
+        ...baseConfig,
+        provider: {
+          ...(config.provider?.id === identity.providerId ? config.provider : {}),
+          ...latestProvider
+        },
+        model: resolvedModel
+      }
+
+      const providerId = (completeConfig.provider.id || completeConfig.providerId || '').toLowerCase()
 
       // Historical metadata might incorrectly mark Ollama as CORS-restricted.
       // Ollama can be configured (CORS/reverse-proxy), so we force-disable the tag.
-      if (providerId === 'ollama' && config.provider.corsRestricted !== false) {
-        return {
-          ...config,
+      if (providerId === 'ollama' && completeConfig.provider.corsRestricted !== false) {
+        completeConfig = {
+          ...completeConfig,
           provider: {
-            ...config.provider,
+            ...completeConfig.provider,
             corsRestricted: false
           }
         }
       }
 
-      // 旧存储数据里 provider 可能缺少新字段；用当前 adapter 的 provider 元数据补齐。
-      if (config.provider.corsRestricted === undefined) {
-        try {
-          const latestProvider = this.registry.getAdapter(config.providerId).getProvider()
-          if (latestProvider.corsRestricted !== undefined) {
-            return {
-              ...config,
-              provider: {
-                ...config.provider,
-                corsRestricted: latestProvider.corsRestricted
-              }
-            }
-          }
-        } catch {
-          // ignore - unknown provider or adapter failure
-        }
-      }
-      return config
-    }
-
-    try {
-      // 获取provider和model信息
-      const adapter = this.registry.getAdapter(config.providerId)
-      const provider = adapter.getProvider()
-
-      // 尝试从静态模型列表获取模型信息
-      let model = this.registry.getStaticModels(config.providerId).find(m => m.id === config.modelId)
-
-      // 如果静态模型不存在，使用buildDefaultModel构建
-      if (!model) {
-        model = adapter.buildDefaultModel(config.modelId)
-      }
-
-      // 返回自包含配置
-      return {
-        ...config,
-        provider,
-        model,
-        paramOverrides: config.paramOverrides ?? {}
-      }
+      return completeConfig
     } catch (error) {
       // 对于无法修复的旧配置，创建占位数据并禁用，允许用户查看和删除
       console.warn(`[ImageModelManager] Cannot repair legacy config ${config.id}, marking as disabled:`, error)
       return {
-        ...config,
+        ...baseConfig,
         enabled: false,
         provider: {
-          id: config.providerId || 'unknown',
-          name: `Unknown Provider (${config.providerId || 'unknown'})`,
-          description: '此配置损坏，无法修复',
+          id: identity.providerId || 'unknown',
+          name: `Unknown Provider (${identity.providerId || 'unknown'})`,
+          description: 'This configuration is corrupted and cannot be repaired.',
           requiresApiKey: false,
           supportsDynamicModels: false,
           defaultBaseURL: '',
           connectionSchema: { required: [], optional: [], fieldTypes: {} }
         },
         model: {
-          id: config.modelId || 'unknown',
-          name: `Unknown Model (${config.modelId || 'unknown'})`,
-          description: '此配置损坏，请删除后重新创建',
-          providerId: config.providerId || 'unknown',
+          id: identity.modelId || 'unknown',
+          name: `Unknown Model (${identity.modelId || 'unknown'})`,
+          description: 'This configuration is corrupted. Please delete it and create a new one.',
+          providerId: identity.providerId || 'unknown',
           capabilities: {
             text2image: false,
             image2image: false,
@@ -440,38 +481,63 @@ export class ImageModelManager implements IImageModelManager {
   }
 
   /**
+   * 获取可从默认配置回填到内置模型中的缺失必填连接字段
+   */
+  private getBackfillableBuiltinConnectionFields(
+    configId: string,
+    storedConfig: ImageModelConfig,
+    defaultConfig: ImageModelConfig
+  ): string[] {
+    const builtinIds = getBuiltinImageConfigIds()
+    if (!builtinIds.includes(configId)) {
+      return []
+    }
+
+    const requiredFields = defaultConfig.provider.connectionSchema?.required || ['apiKey']
+    return requiredFields.filter((field) => {
+      const storedValue = storedConfig.connectionConfig?.[field]
+      const defaultValue = defaultConfig.connectionConfig?.[field]
+      return !this.hasConnectionValue(storedValue) && this.hasConnectionValue(defaultValue)
+    })
+  }
+
+  /**
    * 判断是否应该自动启用内置模型
-   * 条件：内置模型 + 存储的 apiKey 为空 + enabled 为 false + 新配置有 apiKey
+   * 条件：内置模型 + 存储的配置为 disabled + 回填后能满足所有必填连接字段
    */
   private shouldAutoEnableBuiltinModel(
     configId: string,
     storedConfig: ImageModelConfig,
-    defaultConfig: ImageModelConfig
+    defaultConfig: ImageModelConfig,
+    backfillableFields?: string[]
   ): boolean {
-    // 1. 必须是内置模型
     const builtinIds = getBuiltinImageConfigIds()
     if (!builtinIds.includes(configId)) {
       return false
     }
 
-    // 2. 存储的配置必须是禁用状态
     if (storedConfig.enabled !== false) {
       return false
     }
 
-    // 3. 存储的 apiKey 必须为空
-    const storedApiKey = storedConfig.connectionConfig?.apiKey?.trim() || ''
-    if (storedApiKey !== '') {
+    const fieldsToBackfill = backfillableFields ?? this.getBackfillableBuiltinConnectionFields(configId, storedConfig, defaultConfig)
+    if (fieldsToBackfill.length === 0) {
       return false
     }
 
-    // 4. 新的默认配置必须有 apiKey
-    const newApiKey = defaultConfig.connectionConfig?.apiKey?.trim() || ''
-    if (newApiKey === '') {
-      return false
+    const requiredFields = defaultConfig.provider.connectionSchema?.required || ['apiKey']
+    const mergedConnectionConfig: Record<string, unknown> = {
+      ...(storedConfig.connectionConfig || {})
+    }
+    for (const field of fieldsToBackfill) {
+      mergedConnectionConfig[field] = defaultConfig.connectionConfig?.[field]
     }
 
-    return true
+    return requiredFields.every((field) => this.hasConnectionValue(mergedConnectionConfig[field]))
+  }
+
+  private hasConnectionValue(value: unknown): boolean {
+    return typeof value === 'string' ? value.trim().length > 0 : !!value
   }
 
   private validateConfig(config: ImageModelConfig): void {
@@ -500,6 +566,15 @@ export class ImageModelManager implements IImageModelManager {
     }
     if (!config.model || typeof config.model !== 'object') {
       errors.push('Missing or invalid model data')
+    }
+    if (config.provider?.id && config.provider.id !== config.providerId) {
+      errors.push(`Provider identity mismatch: providerId ${config.providerId} does not match provider.id ${config.provider.id}`)
+    }
+    if (config.model?.id && config.model.id !== config.modelId) {
+      errors.push(`Model identity mismatch: modelId ${config.modelId} does not match model.id ${config.model.id}`)
+    }
+    if (config.model?.providerId && config.model.providerId !== config.providerId) {
+      errors.push(`Provider/model metadata mismatch: providerId ${config.providerId} does not match model.providerId ${config.model.providerId}`)
     }
 
     // 验证连接配置（如果存在）

@@ -14,22 +14,28 @@
           <!-- 左侧：Logo + 标题 + 核心导航 -->
           <NFlex align="center" :size="16" :wrap="false">
             <!-- Logo + 标题 -->
-            <NFlex align="center" :size="8" :wrap="false">
-              <NImage
-                :src="logoSrc"
-                alt="Logo"
-                :width="logoSize"
-                :height="logoSize"
-                object-fit="cover"
-                class="logo-image"
-                :show-toolbar="false"
-                :preview-disabled="true"
-                :fallback-src="fallbackLogoSrc"
-              />
-              <NText class="text-lg sm:text-xl font-bold theme-title" tag="h2">
-                <slot name="title">{{ t('common.appName') }}</slot>
-              </NText>
-            </NFlex>
+            <NButton
+              text
+              class="brand-link"
+              @click="openBrandWebsite"
+            >
+              <NFlex align="center" :size="8" :wrap="false">
+                <AppPreviewImage
+                  :src="logoSrc"
+                  alt="Logo"
+                  :width="logoSize"
+                  :height="logoSize"
+                  object-fit="cover"
+                  class="logo-image"
+                  :show-toolbar="false"
+                  :preview-disabled="true"
+                  :fallback-src="fallbackLogoSrc"
+                />
+                <NText class="text-lg sm:text-xl font-bold theme-title" tag="h2">
+                  <slot name="title">{{ t('common.appName') }}</slot>
+                </NText>
+              </NFlex>
+            </NButton>
 
             <!-- 核心导航元素 -->
             <div class="core-navigation">
@@ -66,9 +72,11 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 
 import { useI18n } from 'vue-i18n'
-import { NLayout, NLayoutHeader, NLayoutContent, NFlex, NImage, NText } from 'naive-ui'
+import { NButton, NLayout, NLayoutHeader, NLayoutContent, NFlex, NText } from 'naive-ui'
 import ToastUI from './Toast.vue'
 import logoImage from '../assets/logo.png'
+import AppPreviewImage from './media/AppPreviewImage.vue'
+import { openExternalUrl } from '../utils/open-external-url'
 
 const { t } = useI18n()
 
@@ -116,6 +124,10 @@ const logoSize = computed(() => {
   }
   return 28 // 默认尺寸
 })
+
+const openBrandWebsite = async () => {
+  await openExternalUrl('https://always200.com', { logPrefix: 'MainLayout' })
+}
 </script>
 
 <style>
@@ -149,6 +161,36 @@ const logoSize = computed(() => {
   min-height: 40px;
 }
 
+.brand-link {
+  align-items: center;
+  padding: 6px 10px 6px 6px;
+  border-radius: 12px;
+  color: inherit;
+  transition:
+    background-color 0.2s ease-in-out,
+    box-shadow 0.2s ease-in-out,
+    transform 0.2s ease-in-out;
+}
+
+.brand-link:hover {
+  background: color-mix(in srgb, var(--n-primary-color) 10%, transparent);
+  transform: translateY(-1px);
+}
+
+.brand-link:hover .logo-image {
+  transform: scale(1.05);
+}
+
+.brand-link:hover .theme-title {
+  opacity: 0.88;
+}
+
+.brand-link:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--n-primary-color) 14%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--n-primary-color) 28%, transparent);
+}
+
 /* Logo样式优化 */
 .logo-image {
   border-radius: 6px;
@@ -156,15 +198,12 @@ const logoSize = computed(() => {
   flex-shrink: 0;
 }
 
-.logo-image:hover {
-  transform: scale(1.05);
-}
-
 /* 标题文字对齐优化 */
 .theme-title {
   line-height: 1.2 !important;
   margin: 0 !important;
   white-space: nowrap;
+  transition: opacity 0.2s ease-in-out;
 }
 
 /* 核心导航样式 */
@@ -173,38 +212,8 @@ const logoSize = computed(() => {
   align-items: center;
   margin-left: 16px;
   padding-left: 16px;
-  border-left: 1px solid var(--border-color, rgba(239, 239, 245, 0.6));
+  border-left: 1px solid var(--n-border-color);
   min-height: 32px;
-}
-
-.core-navigation :deep(.function-mode-selector) {
-  transform: scale(1.05);
-}
-
-.core-navigation :deep(.n-radio-group) {
-  background: var(--modal-color, #fff);
-  border-radius: 8px;
-  padding: 4px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  border: 1px solid var(--border-color, rgba(239, 239, 245, 0.6));
-}
-
-.core-navigation :deep(.n-radio-button) {
-  font-weight: 500;
-  min-width: 60px;
-  border-radius: 6px !important;
-  transition: all 0.2s ease;
-}
-
-.core-navigation :deep(.n-radio-button--checked) {
-  background: var(--primary-color) !important;
-  color: white !important;
-  font-weight: 600;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12);
-}
-
-.core-navigation :deep(.n-radio-button:not(.n-radio-button--checked):hover) {
-  background: var(--hover-color, rgba(0, 0, 0, 0.06));
 }
 
 /* 响应式优化 */
@@ -216,15 +225,6 @@ const logoSize = computed(() => {
   .core-navigation {
     margin-left: 8px;
     padding-left: 8px;
-  }
-
-  .core-navigation :deep(.function-mode-selector) {
-    transform: scale(0.95);
-  }
-
-  .core-navigation :deep(.n-radio-button) {
-    min-width: 48px;
-    font-size: 12px;
   }
 }
 

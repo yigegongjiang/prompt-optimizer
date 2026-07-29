@@ -4,10 +4,8 @@
 
 // 基础模式 - 系统提示词评估
 export {
-  evaluationBasicSystemOriginal,
-  evaluationBasicSystemOriginalEn,
-  evaluationBasicSystemOptimized,
-  evaluationBasicSystemOptimizedEn,
+  evaluationBasicSystemResult,
+  evaluationBasicSystemResultEn,
   evaluationBasicSystemCompare,
   evaluationBasicSystemCompareEn,
   evaluationBasicSystemPromptOnly,
@@ -18,10 +16,8 @@ export {
 
 // 基础模式 - 用户提示词评估
 export {
-  evaluationBasicUserOriginal,
-  evaluationBasicUserOriginalEn,
-  evaluationBasicUserOptimized,
-  evaluationBasicUserOptimizedEn,
+  evaluationBasicUserResult,
+  evaluationBasicUserResultEn,
   evaluationBasicUserCompare,
   evaluationBasicUserCompareEn,
   evaluationBasicUserPromptOnly,
@@ -32,10 +28,8 @@ export {
 
 // 高级模式 - 系统提示词评估（多消息模式）
 export {
-  evaluationProSystemOriginal,
-  evaluationProSystemOriginalEn,
-  evaluationProSystemOptimized,
-  evaluationProSystemOptimizedEn,
+  evaluationProSystemResult,
+  evaluationProSystemResultEn,
   evaluationProSystemCompare,
   evaluationProSystemCompareEn,
   evaluationProSystemPromptOnly,
@@ -46,10 +40,8 @@ export {
 
 // 高级模式 - 用户提示词评估（变量模式）
 export {
-  evaluationProUserOriginal,
-  evaluationProUserOriginalEn,
-  evaluationProUserOptimized,
-  evaluationProUserOptimizedEn,
+  evaluationProUserResult,
+  evaluationProUserResultEn,
   evaluationProUserCompare,
   evaluationProUserCompareEn,
   evaluationProUserPromptOnly,
@@ -62,6 +54,8 @@ export {
 export {
   evaluationImageText2ImagePromptOnly,
   evaluationImageText2ImagePromptOnlyEn,
+  evaluationImageText2ImagePromptIterate,
+  evaluationImageText2ImagePromptIterateEn,
 } from './image/text2image';
 
 // 图像模式 - 图生图评估
@@ -69,3 +63,9 @@ export {
   evaluationImageImage2ImagePromptOnly,
   evaluationImageImage2ImagePromptOnlyEn,
 } from './image/image2image';
+
+// 图像模式 - 多图生图评估
+export {
+  evaluationImageMultiImagePromptOnly,
+  evaluationImageMultiImagePromptOnlyEn,
+} from './image/multiimage';

@@ -1,324 +1,195 @@
-# Web版部署指南
+# Web 版部署
 
-本指南将详细介绍如何部署 Prompt Optimizer 的Web版本，包括在线版使用、Vercel部署和访问控制配置。
+先一句话说明它的定位：
 
-## 🌐 在线版本使用
+**Web 版只是前端页面，不是模型代理层。**
 
-### 直接访问（推荐）
+无论你使用官方在线站还是自己部署静态站，模型请求都会由浏览器直接发往模型服务。
 
-**在线地址**：[https://prompt.always200.com](https://prompt.always200.com)
+## 它和 Docker、MCP 是什么关系
 
-**在线版优势**：
-- ✅ **即开即用** - 无需安装配置，打开即可使用
-- ✅ **始终最新** - 自动获得最新功能和修复
-- ✅ **跨平台支持** - 支持所有现代浏览器
-- ✅ **数据安全** - 纯前端应用，数据仅存储在本地浏览器
+这三者很容易混淆，可以先按下面理解：
 
-**使用注意事项**：
-- 所有数据存储在浏览器本地，清除浏览器数据会丢失配置
-- API调用直接从浏览器发送到AI服务商，不经过中间服务器
-- 受浏览器跨域限制，某些本地或特殊API可能无法访问
+| 方式 | 你会得到什么 | 适合什么 |
+| --- | --- | --- |
+| Web 版 | 一个可访问的前端页面 | 在线使用、静态托管 |
+| Docker | Web 页面 + 容器内 `/mcp` 服务 | 自托管、局域网部署 |
+| 独立 MCP | 只有 MCP 服务，不带 Web 页面 | 接入 MCP 客户端 |
 
-### 浏览器要求
+如果你想一次起 Web 和 MCP，优先看 [Docker 基础部署](docker-basic.md)。
 
-**支持的浏览器**：
-- Chrome 88+ （推荐）
-- Firefox 85+
-- Safari 14+
-- Edge 88+
+如果你只关心 MCP 接入方式，直接看 [MCP 服务器](../user/mcp-server.md)。
 
-**必需功能**：
-- 启用JavaScript
-- 启用本地存储（localStorage）
-- 支持现代Web标准（ES2020+）
+## 什么时候适合用 Web 版
 
-## ☁️ Vercel部署
+适合：
 
-### 方式一：一键部署（快速）
+- 主要连接公开 HTTPS 模型 API
+- 想快速上线一个可访问的前端站点
+- 不需要访问 `http://localhost` 之类的本地接口
 
-**直接部署**：
-[![部署到 Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Flinshenkx%2Fprompt-optimizer)
+不太适合：
 
-**特点**：
-- ✅ 部署快速，几分钟即可完成
-- ❌ 无法跟踪源项目更新
-- ❌ 更新需要重新部署
+- 主要连接 Ollama、LM Studio、本地网关
+- 需要访问企业内网且跨域策略严格的 API
+- 想靠“前端部署”来绕过浏览器限制
 
-### 方式二：Fork后部署（推荐）
+## 最简单的 2 种用法
 
-#### 步骤1：Fork项目
+### 1. 直接使用官方在线站
 
-1. **访问源项目**：[GitHub - prompt-optimizer](https://github.com/linshenkx/prompt-optimizer)
-2. **点击Fork按钮**：将项目Fork到你的GitHub账户
-3. **等待Fork完成**：确保所有文件都已复制
+地址：<https://prompt.always200.com>
 
-#### 步骤2：Vercel导入
+这是最省事的方式，但浏览器限制依然存在：
 
-1. **登录Vercel**：访问 [vercel.com](https://vercel.com) 并登录
-2. **新建项目**：点击"New Project"按钮
-3. **导入GitHub仓库**：选择你Fork的prompt-optimizer项目
-4. **配置项目**：
-   - 项目名称：自定义项目名称
-   - Framework Preset：选择"Vite"
-   - 构建目录：保持默认设置
+- 数据默认保存在当前浏览器本地
+- 请求会直接发送给你配置的模型服务
+- 如果模型服务不允许浏览器跨域访问，在线站同样无法绕过
 
-#### 步骤3：部署配置
+### 2. 自己部署静态站
 
-**构建设置**：
-- **Framework**: Vite
-- **Build Command**: `pnpm build`
-- **Output Directory**: `dist`
-- **Node.js Version**: 18.x
+仓库根目录提供了 `vercel.json`，可以直接部署到 Vercel。
 
-**高级设置**：
-- **环境变量**：根据需要配置API密钥和访问控制
-- **域名设置**：可配置自定义域名
-- **分支设置**：选择要部署的分支（通常是main或master）
+如果你不使用 Vercel，也可以把构建产物部署到任意静态托管平台。
 
-### 环境变量配置
+## 部署到 Vercel
 
-#### API密钥配置
+推荐流程：
 
-在Vercel项目设置中的"Environment Variables"部分添加：
+1. Fork 本仓库
+2. 在 Vercel 中导入该仓库
+3. 保持仓库根目录为项目根目录
+4. 配置环境变量
+5. 部署
 
-```
-# OpenAI
-VITE_OPENAI_API_KEY=your_openai_api_key
+### 环境变量安全
 
-# Gemini
-VITE_GEMINI_API_KEY=your_gemini_api_key
+不要在公开 Web 站点中预置模型 API Key。`VITE_*` 变量会进入前端构建产物，访问者可以在浏览器下载到这些值。公开站点应让用户在应用界面的模型管理中自行填写自己的 API Key。
 
-# DeepSeek  
-VITE_DEEPSEEK_API_KEY=your_deepseek_api_key
+只有在受控的私有部署中，才考虑预置 `VITE_*` 模型配置；同时应配合访问控制，并使用可轮换、权限受限、费用受控的密钥。
 
-# 智谱AI
-VITE_ZHIPU_API_KEY=your_zhipu_api_key
+### 可选：站点密码保护
 
-# SiliconFlow
-VITE_SILICONFLOW_API_KEY=your_siliconflow_api_key
+如果你在 Vercel 上设置：
+
+```bash
+ACCESS_PASSWORD=your_password
 ```
 
-#### 自定义模型配置
+站点会先显示密码页。对应逻辑由根目录的 `middleware.js` 和 `api/auth.js` 提供。
 
-支持配置无限数量的自定义模型：
+## 部署到 Cloudflare
 
-```
-# 自定义模型示例：Ollama
-VITE_CUSTOM_API_KEY_ollama=dummy_key
-VITE_CUSTOM_API_BASE_URL_ollama=http://localhost:11434/v1
-VITE_CUSTOM_API_MODEL_ollama=qwen2.5:7b
+公开仓库用户可以优先使用 Cloudflare 官方的一键部署按钮：
 
-# 自定义模型示例：其他OpenAI兼容API
-VITE_CUSTOM_API_KEY_mymodel=your_api_key
-VITE_CUSTOM_API_BASE_URL_mymodel=https://api.example.com/v1
-VITE_CUSTOM_API_MODEL_mymodel=custom-model-name
-```
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/linshenkx/prompt-optimizer)
 
-**配置规则**：
-- `VITE_CUSTOM_API_KEY_[modelname]`：API密钥
-- `VITE_CUSTOM_API_BASE_URL_[modelname]`：API基础URL
-- `VITE_CUSTOM_API_MODEL_[modelname]`：模型名称
+这个流程会把源仓库克隆到你的 GitHub/GitLab 账号下，并使用 Workers Builds 创建和部署 Worker。仓库根目录的 `wrangler.jsonc` 会配置 Web 前端构建命令，把 `packages/web/dist` 配置为 Workers Static Assets 的静态资源目录，并为单页应用启用 `index.html` 回退。
 
-#### 访问控制配置
+需要注意：
 
-```
-# 访问控制（可选）
-ACCESS_USERNAME=admin
-ACCESS_PASSWORD=your_secure_password
-```
+- Deploy to Cloudflare 按钮要求源仓库是公开的 GitHub/GitLab 仓库。
+- 如果你想使用私有仓库，或想手动限制 Cloudflare GitHub App 只访问指定仓库，请使用下面的手动导入方式。
 
-启用后，访问应用需要输入用户名和密码。
+### 手动导入仓库
 
-### 部署后配置
+手动导入适合私有仓库、组织仓库、需要精细控制 GitHub App 权限，或一键部署按钮失败的场景。当前 Cloudflare Dashboard 可能会进入 **Workers Static Assets** 流程；如果界面显示“创建 Worker”“部署命令 `npx wrangler deploy`”，请使用 Workers 配置。
 
-#### 验证部署
+1. Fork 本仓库
+2. 在 Cloudflare Dashboard 中进入 **Workers & Pages**
+3. 选择通过 GitHub/Git 仓库创建应用
+4. 选择你 fork 后的 `prompt-optimizer` 仓库
+5. 如果界面显示“创建 Worker”，大多数配置保持默认：
 
-1. **访问应用**：通过Vercel提供的URL访问应用
-2. **功能测试**：测试基本的提示词优化功能
-3. **API连接测试**：在模型管理中测试API连接
-4. **环境变量验证**：确认配置的API密钥生效
+| 配置项 | 推荐值 |
+| --- | --- |
+| Worker name | 如果自动填入 `prompt-optimizer`，保持不变；否则改成 `prompt-optimizer` |
+| Root directory / Path | 保持默认，通常是 `/` 或留空 |
+| Build command | 清空；如果自动填入 `pnpm run build`，请删除。`wrangler.jsonc` 已配置构建命令 |
+| Deploy command | 保持默认 `npx wrangler deploy` |
+| Non-production branch deploy command | 保持默认 `npx wrangler versions upload` |
 
-#### 自动更新
+如果部署日志出现 `The Wrangler application detection logic has been run in the root of a workspace`，说明 Wrangler 没有读到项目根目录的 `wrangler.jsonc`，于是尝试在 monorepo 根目录自动识别应用。请确认当前部署的提交已经包含 `wrangler.jsonc`；如果仍然报错，再把部署命令改成 `npx wrangler deploy --config wrangler.jsonc`，把非生产分支部署命令改成 `npx wrangler versions upload --config wrangler.jsonc`。
 
-**配置自动更新**：
-1. 在Vercel项目设置中启用"Git Integration"
-2. 每次原项目更新后，在你的Fork仓库中：
-   - 点击"Sync fork"按钮
-   - 或通过GitHub Desktop/命令行同步
+如果你的 Cloudflare Dashboard 仍然显示 **Create application** -> **Pages** -> **Connect to Git**，也可以继续使用 Pages 表单：
 
-**自动化同步**（高级用户）：
-- 可以通过GitHub Actions自动同步上游更新
-- 配置定时任务定期检查更新
+| 配置项 | 推荐值 |
+| --- | --- |
+| Framework preset | `None` 或留空 |
+| Root directory | `/` 或留空 |
+| Build command | `pnpm -F @prompt-optimizer/core build && pnpm -F @prompt-optimizer/ui build && pnpm -F @prompt-optimizer/web build` |
+| Build output directory | `packages/web/dist` |
 
-## 🔒 访问控制
+通常不需要手动配置构建环境变量。Cloudflare 会根据仓库里的 `packageManager` 和 `engines` 检测 `pnpm` 和 Node.js 版本。
 
-### 密码保护
+如果 Cloudflare 检测到的版本不正确，再在构建环境变量中设置：
 
-**启用访问控制**：
-通过环境变量配置访问密码：
-
-```
-ACCESS_USERNAME=admin
-ACCESS_PASSWORD=your_secure_password
+```bash
+NODE_VERSION=22
+PNPM_VERSION=10.6.1
 ```
 
-**访问流程**：
-1. 用户访问应用时显示登录页面
-2. 输入正确的用户名和密码
-3. 登录成功后正常使用所有功能
-4. 登录状态会保持到浏览器关闭
+不要在公开 Cloudflare 站点中预置模型 API Key。所有 `VITE_*` 变量都会进入前端构建产物，访问者可以在浏览器下载到这些值。公开站点应让用户在应用界面的模型管理中自行填写自己的 API Key。
 
-### IP白名单
+只有在受控的私有部署中，才考虑预置 `VITE_*` 模型配置；同时应配合 Cloudflare Access，并使用可轮换、权限受限、费用受控的密钥。
 
-**Vercel配置**：
-在`vercel.json`文件中配置IP限制：
+### 可选：Cloudflare Access 和 Web Analytics
 
-```json
-{
-  "functions": {
-    "pages/api/auth.js": {
-      "includeFiles": "**"
-    }
-  },
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        {
-          "key": "X-Frame-Options",
-          "value": "DENY"
-        }
-      ]
-    }
-  ]
-}
+Cloudflare 部署不会使用 Vercel 的 `ACCESS_PASSWORD`、`middleware.js` 或 `/api/auth`。如果你需要限制访问，推荐在 Cloudflare Zero Trust 中为 Workers 或 Pages 域名配置 Cloudflare Access。
+
+Cloudflare Web Analytics 可以在 Cloudflare 控制台启用，不需要安装 `@vercel/analytics` 之类的前端依赖。
+
+!!! note
+    当前 Web 版使用 hash 路由。Cloudflare Web Analytics 可以统计站点访问和性能数据，但不会自动把 `/#/xxx` 这类 hash 内页面切换当作独立页面浏览。
+
+## 部署到其他静态托管
+
+本地构建：
+
+```bash
+pnpm install
+pnpm build
 ```
 
-### 企业部署
+构建完成后，Web 前端产物位于：
 
-**内网部署**：
-1. 将代码部署到内网Vercel或其他平台
-2. 配置企业级访问控制
-3. 集成企业SSO系统
-4. 设置数据备份策略
-
-## 🚀 性能优化
-
-### 构建优化
-
-**Vite配置优化**：
-```javascript
-// vite.config.js
-export default defineConfig({
-  build: {
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          vendor: ['vue', 'naive-ui']
-        }
-      }
-    }
-  }
-})
+```text
+packages/web/dist
 ```
 
-**CDN加速**：
-- Vercel自动提供全球CDN加速
-- 支持静态资源缓存优化
-- 自动压缩CSS/JS文件
+把这个目录部署到 Nginx、OSS、S3、Cloudflare Pages 或其他静态托管平台即可。
 
-### 缓存策略
+!!! note
+    如果你不用 Vercel，自行部署静态文件时，`ACCESS_PASSWORD` 密码页和 `/api/auth` 不会自动存在；那是 Vercel 方案里的能力。
 
-**浏览器缓存**：
-- 静态资源采用长期缓存
-- API响应可配置缓存策略
-- 用户数据存储在localStorage
+## Web 版最大的限制在哪里
 
-## 🔧 故障排除
+问题通常不在“页面能不能打开”，而在“浏览器能不能连上模型服务”。
 
-### 部署失败
+### CORS
 
-**常见问题**：
+如果模型服务没有返回允许浏览器跨域的响应头，Web 版会直接失败。
 
-1. **构建失败**
-   ```
-   Error: Build failed with exit code 1
-   ```
-   **解决方案**：
-   - 检查Node.js版本是否为18.x
-   - 确认package.json中的依赖版本
-   - 检查环境变量配置
+### Mixed Content
 
-2. **内存不足**
-   ```
-   Error: JavaScript heap out of memory
-   ```
-   **解决方案**：
-   - 在Vercel设置中调整内存限制
-   - 优化构建配置减少内存使用
+如果你的站点是 `https://...`，但模型接口是 `http://localhost:...`，浏览器通常会拦截。
 
-3. **域名解析问题**
-   ```
-   Error: Domain not found
-   ```
-   **解决方案**：
-   - 检查DNS配置
-   - 验证CNAME记录设置
+### 企业网络策略
 
-### 运行时问题
+如果公司网络拦截未知 API 域名、限制自签名证书或要求代理，前端站点本身并不能自动解决这些问题。
 
-**API调用失败**：
-1. 检查环境变量是否正确配置
-2. 验证API密钥是否有效
-3. 确认模型服务状态正常
-4. 检查跨域配置
+## 什么时候该改用别的方案
 
-**页面加载慢**：
-1. 检查CDN缓存状态
-2. 优化图片和静态资源
-3. 启用Vercel的性能监控
-4. 分析和优化关键渲染路径
+如果你遇到下面这些需求，通常应该换到别的方式：
 
-## 📊 监控与分析
+- 连接 Ollama / LM Studio：优先 [桌面应用](desktop.md)
+- 连接局域网 HTTP 接口：优先 [桌面应用](desktop.md)
+- 想同时提供 Web 和 MCP：优先 [Docker 基础部署](docker-basic.md)
+- 只想对外提供 MCP：看 [MCP 服务器](../user/mcp-server.md)
 
-### Vercel Analytics
+## 相关页面
 
-**启用分析**：
-1. 在Vercel项目设置中启用Analytics
-2. 查看访问量、性能指标
-3. 分析用户行为数据
-4. 监控错误率和响应时间
-
-### 用户反馈
-
-**收集反馈**：
-- 通过GitHub Issues收集问题报告
-- 设置用户反馈渠道
-- 定期分析使用数据
-- 根据反馈优化功能
-
-## 🔄 更新和维护
-
-### 版本更新
-
-**跟踪更新**：
-1. 关注原项目的Release页面
-2. 定期同步Fork的仓库
-3. 测试新版本的兼容性
-4. 更新环境变量配置
-
-**回滚策略**：
-- Vercel支持一键回滚到之前版本
-- 保持重要配置的备份
-- 测试环境验证更新
-
-### 数据备份
-
-**用户数据**：
-- 提醒用户定期导出数据
-- 提供数据迁移指南
-- 确保跨版本兼容性
-
----
-
-通过本指南，你应该能够成功部署并配置自己的 Prompt Optimizer Web版本。如果遇到问题，请查看[帮助支持](../help/common-questions.md)或在GitHub提交Issue。
+- [桌面应用](desktop.md)
+- [Docker 基础部署](docker-basic.md)
+- [MCP 服务器](../user/mcp-server.md)
+- [连接问题](../help/connection-issues.md)
