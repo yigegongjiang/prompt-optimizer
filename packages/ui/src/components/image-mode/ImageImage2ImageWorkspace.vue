@@ -545,6 +545,7 @@
                                                 filterable
                                                 :show-config-action="!!appOpenModelManager"
                                                 :show-empty-config-c-t-a="true"
+                                                @focus="refreshImageModels"
                                                 @config="() => appOpenModelManager && appOpenModelManager('image')"
                                                 style="min-width: 0; width: 100%;"
                                             />
@@ -864,6 +865,7 @@ import { withHistorySourceBindingMetadata } from '../../utils/history-source-bin
 import { resolveSourceAssetRef } from '../../utils/source-asset'
 import { downloadImageSource } from '../../utils/image-download'
 import { createImagePromptAnalysisVersion } from '../../utils/imagePromptAnalysis'
+import { useImageInputPreparation } from '../../composables/image/useImageInputPreparation'
 import type { PromptGardenImportRequest } from '../../utils/prompt-garden-import'
 import { VariableAwareInput } from '../variable-extraction'
 import TemporaryVariablesPanel from '../variable/TemporaryVariablesPanel.vue'
@@ -930,6 +932,7 @@ interface VariantInputImageInfo {
 
 // Toast
 const toast = useToast();
+const { prepareFiles: prepareImageFiles } = useImageInputPreparation()
 
 // 服务注入
 const services = inject<Ref<AppServices | null>>("services", ref(null));
@@ -1009,6 +1012,7 @@ const {
     generateImage2Image,
     validateImage2ImageRequest,
     loadImageModels,
+    isImageModelListReady,
 } = useImageGeneration()
 
 // 服务引用
@@ -1087,12 +1091,7 @@ const evaluationHandler = useEvaluationHandler({
     evaluationModelKey: computed(() => selectedTextModelKey.value || ''),
     resolveEvaluationModelKey: async () => {
         await functionModelManager.initialize()
-        return (
-            functionModelManager.evaluationModel.value ||
-            selectedTextModelKey.value ||
-            functionModelManager.effectiveEvaluationModel.value ||
-            ''
-        )
+        return functionModelManager.resolveEvaluationModelKey(selectedTextModelKey.value)
     },
     functionMode: computed(() => 'image'),
     subMode: computed(() => 'image2image'),
@@ -1429,8 +1428,8 @@ const versionOptions = computed(() => {
 watch(
     () => imageModelOptions.value,
     (opts) => {
+        if (!isImageModelListReady.value) return
         const fallback = opts?.[0]?.value || ''
-        if (!fallback) return
         const keys = new Set((opts || []).map((o) => o.value))
 
         const legacy = session.selectedImageModelKey
@@ -2027,40 +2026,37 @@ const handleUploadChange = async (data: ImageUploadChangePayload) => {
         return
     }
 
-    // 验证文件大小
-    if (file.size > 10 * 1024 * 1024) {
-        toast.error(t('imageWorkspace.upload.fileTooLarge'))
-        uploadStatus.value = 'error'
+    uploadStatus.value = 'uploading'
+    uploadProgress.value = 10
+
+    const prepared = await prepareImageFiles([file])
+    if (!prepared) {
+        uploadStatus.value = 'idle'
+        uploadProgress.value = 0
         return
     }
 
-    uploadStatus.value = 'uploading'
-    uploadProgress.value = 0
+    const preparedFile = prepared[0].file
+    uploadProgress.value = 60
 
-    const reader = new FileReader()
-
-    reader.onload = async () => {
-        const dataUrl = reader.result as string
+    try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(String(reader.result || ''))
+            reader.onerror = () => reject(reader.error || new Error('Failed to read image'))
+            reader.readAsDataURL(preparedFile)
+        })
         const base64 = dataUrl.split(',')[1]
-        session.updateInputImage(base64, file.type)
+        session.updateInputImage(base64, preparedFile.type)
         await queueSessionSave()
         uploadStatus.value = 'success'
         uploadProgress.value = 100
-        toast.success(t('imageWorkspace.upload.uploadSuccess'))
-    }
 
-    reader.onerror = () => {
+    } catch (error) {
+        console.error('[ImageImage2ImageWorkspace] Failed to read uploaded image:', error)
         toast.error(t('imageWorkspace.upload.readFailed'))
         uploadStatus.value = 'error'
     }
-
-    reader.onprogress = e => {
-        if (e.lengthComputable) {
-            uploadProgress.value = Math.round((e.loaded / e.total) * 100)
-        }
-    }
-
-    reader.readAsDataURL(file)
 }
 
 // 弹窗中的上传处理
@@ -2253,6 +2249,7 @@ const refreshImageModels = async () => {
         }))
 
         if (!imageModels.value.length) {
+            if (isImageModelListReady.value) selectedImageModelKey.value = ''
             return
         }
 

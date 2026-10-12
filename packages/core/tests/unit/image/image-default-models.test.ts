@@ -48,7 +48,7 @@ describe('default image models', () => {
 
     expect(models['image-seedream-50-lite']).toBeDefined()
     expect(models['image-seedream-50-lite'].providerId).toBe('seedream')
-    expect(models['image-seedream-50-lite'].modelId).toBe('doubao-seedream-5-0-260128')
+    expect(models['image-seedream-50-lite'].modelId).toBe('doubao-seedream-5-0-lite-260128')
     expect(models['image-seedream-50-lite'].enabled).toBe(true)
   })
 
@@ -71,8 +71,8 @@ describe('default image models', () => {
 
     expect(openaiConfig).toBeDefined()
     expect(openaiConfig.providerId).toBe('openai')
-    expect(openaiConfig.modelId).toBe('gpt-image-2')
-    expect(openaiConfig.model.id).toBe('gpt-image-2')
+    expect(openaiConfig.modelId).toBe('gpt-image-2.5-flare')
+    expect(openaiConfig.model.id).toBe('gpt-image-2.5-flare')
     expect(openaiConfig.model.capabilities.multiImage).toBe(true)
     expect(openaiConfig.connectionConfig?.apiKey).toBe('openai-key')
     expect(openaiConfig.enabled).toBe(true)
@@ -158,7 +158,7 @@ describe('default image models', () => {
 
     expect(grokConfig).toBeDefined()
     expect(grokConfig.providerId).toBe('grok')
-    expect(grokConfig.modelId).toBe('grok-imagine-image-quality')
+    expect(grokConfig.modelId).toBe('grok-imagine-image-2.0')
     expect(grokConfig.model.capabilities.text2image).toBe(true)
     expect(grokConfig.model.capabilities.image2image).toBe(true)
     expect(grokConfig.model.capabilities.multiImage).toBe(true)

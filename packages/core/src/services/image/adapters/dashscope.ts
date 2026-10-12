@@ -54,16 +54,32 @@ export class DashScopeImageAdapter extends AbstractImageProviderAdapter {
 
   getModels(): ImageModel[] {
     return [
-      // Qwen-Image 文生图模型
       {
-        id: 'qwen-image',
-        name: 'Qwen Image',
-        description: 'Qwen text-to-image model with strong text rendering, multi-line layout, and paragraph-level text generation support',
+        id: 'qwen-image-3.0-pro',
+        name: 'Qwen Image 3.0 Pro',
+        description: 'Flagship unified Qwen image model for text-to-image generation and image editing',
         providerId: 'dashscope',
         capabilities: {
           text2image: true,
-          image2image: false,
-          multiImage: false
+          image2image: true,
+          multiImage: true
+        },
+        parameterDefinitions: this.getQwenImageParameterDefinitions(),
+        defaultParameterValues: {
+          size: '1328*1328',
+          prompt_extend: true,
+          watermark: false
+        }
+      },
+      {
+        id: 'qwen-image-3.0',
+        name: 'Qwen Image 3.0',
+        description: 'Fast unified Qwen image model for text-to-image generation and image editing',
+        providerId: 'dashscope',
+        capabilities: {
+          text2image: true,
+          image2image: true,
+          multiImage: true
         },
         parameterDefinitions: this.getQwenImageParameterDefinitions(),
         defaultParameterValues: {
@@ -181,6 +197,17 @@ export class DashScopeImageAdapter extends AbstractImageProviderAdapter {
       }
     }
 
+    if (testType === 'image2image') {
+      return {
+        prompt: 'make this image more colorful',
+        inputImage: {
+          b64: AbstractImageProviderAdapter.TEST_IMAGE_BASE64.split(',')[1],
+          mimeType: 'image/png'
+        },
+        count: 1
+      }
+    }
+
     throw new ImageError(IMAGE_ERROR_CODES.UNSUPPORTED_TEST_TYPE, undefined, { testType })
   }
 
@@ -209,8 +236,13 @@ export class DashScopeImageAdapter extends AbstractImageProviderAdapter {
     return modelId.startsWith('qwen-image-edit')
   }
 
+  private isQwenImageUnifiedModel(modelId: string): boolean {
+    return modelId === 'qwen-image-2.0' || modelId.startsWith('qwen-image-3.0')
+  }
+
   protected async doGenerate(request: ImageRequest, config: ImageModelConfig): Promise<ImageResult> {
-    if (this.isQwenImageEditModel(config.modelId)) {
+    const hasInputImages = !!request.inputImage || !!request.inputImages?.length
+    if (this.isQwenImageEditModel(config.modelId) || (this.isQwenImageUnifiedModel(config.modelId) && hasInputImages)) {
       // Qwen-Image-Edit 图生图使用同步 API
       return await this.generateWithQwenImageEdit(request, config)
     }
@@ -325,12 +357,18 @@ export class DashScopeImageAdapter extends AbstractImageProviderAdapter {
     // 构建 content 数组，包含输入图像和文本提示词
     const content: Array<{ image?: string; text?: string }> = []
 
+    const inputImages = request.inputImages?.length
+      ? request.inputImages
+      : request.inputImage
+        ? [request.inputImage]
+        : []
+
     // 添加输入图像
-    if (request.inputImage) {
+    for (const inputImage of inputImages) {
       // DashScope 的 image 字段要求：公网 URL 或 data:{mime};base64,{data}。
       // 本项目只支持本地 base64，因此这里统一拼成 data URL。
-      const mimeType = request.inputImage.mimeType || 'image/png'
-      const b64 = request.inputImage.b64 || ''
+      const mimeType = inputImage.mimeType || 'image/png'
+      const b64 = inputImage.b64 || ''
       const dataUrl = b64.startsWith('data:') ? b64 : `data:${mimeType};base64,${b64}`
       content.push({ image: dataUrl })
     }
@@ -349,6 +387,7 @@ export class DashScopeImageAdapter extends AbstractImageProviderAdapter {
         ]
       },
       parameters: {
+        ...(this.isQwenImageUnifiedModel(config.modelId) ? { size: merged.size || '1328*1328' } : {}),
         ...(merged.negative_prompt ? { negative_prompt: merged.negative_prompt } : {}),
         ...(merged.prompt_extend !== undefined ? { prompt_extend: merged.prompt_extend } : {}),
         ...(merged.watermark !== undefined ? { watermark: merged.watermark } : {}),

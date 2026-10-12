@@ -44,13 +44,13 @@ export function useWorkspaceTextModelSelection<T extends WorkspaceTextModelSessi
   }
 
   const refreshTextModels = async () => {
+    const token = ++refreshToken
     const mgr = services.value?.modelManager
     if (!mgr) {
       textModelOptions.value = []
       return
     }
 
-    const token = ++refreshToken
     try {
       await ensureInitializedIfSupported(mgr)
 
@@ -68,10 +68,11 @@ export function useWorkspaceTextModelSelection<T extends WorkspaceTextModelSessi
 
       const invalid = current && !keys.has(current)
       const emptyNeedsFallback = !current && !!fallback
-      if ((invalid || emptyNeedsFallback) && fallback) {
+      if (invalid || emptyNeedsFallback) {
         selectedTextModelKey.value = fallback
       }
     } catch (error) {
+      if (token !== refreshToken) return
       console.error('[useWorkspaceTextModelSelection] refreshTextModels failed:', error instanceof Error ? error.message : String(error), error)
       textModelOptions.value = []
     }

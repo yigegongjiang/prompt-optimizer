@@ -1,18 +1,23 @@
 export const config = {
   matcher: [
     /*
-     * 匹配除以下路径之外的所有路径:
-     * - api routes (以 /api/ 开头)
+     * 匹配除以下静态资源之外的所有路径。
+     * /api/auth 在 middleware 内按完整 pathname 精确放行，避免相似前缀绕过认证。
      * - 静态文件 (以 . 结尾)
      * - 其他静态资源
      */
-    '/((?!api|_next/static|_next/image|favicon.ico|assets/|.*\\.).*)' 
+    '/((?!_next/static|_next/image|favicon.ico|assets/|.*\\.).*)'
   ],
 };
 
 export default function middleware(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
+
+  // 登录/登出接口本身不能要求已登录。仅放行完整路径，不能使用前缀匹配。
+  if (pathname === '/api/auth') {
+    return;
+  }
 
   // 访问环境变量
   const accessPassword = process.env.ACCESS_PASSWORD;
@@ -320,4 +325,4 @@ function generateAuthPage(isChinese = true) {
     </script>
 </body>
 </html>`;
-} 
+}

@@ -270,16 +270,7 @@ export function useEvaluation(
     }
 
     await functionModelManager.initialize()
-    if (functionModelManager.evaluationModel.value) {
-      return functionModelManager.evaluationModel.value
-    }
-
-    const passedModelKey = options.evaluationModelKey?.value || ''
-    if (passedModelKey) {
-      return passedModelKey
-    }
-
-    return functionModelManager.effectiveEvaluationModel.value || ''
+    return functionModelManager.resolveEvaluationModelKey(options.evaluationModelKey?.value)
   }
 
   const getLanguage = (): string => {
@@ -293,6 +284,8 @@ export function useEvaluation(
     functionMode: options.functionMode.value as 'basic' | 'pro' | 'image',
     subMode: options.subMode.value as EvaluationSubMode,
   })
+
+  const activeRequests = new WeakMap<SingleEvaluationState, symbol>()
 
   const executeEvaluation = async (
     type: EvaluationType,
@@ -308,6 +301,9 @@ export function useEvaluation(
     const targetState = getTargetState(type, options.variantId)
     if (!targetState) return
 
+    const requestId = Symbol('evaluation')
+    activeRequests.set(targetState, requestId)
+    const isCurrentRequest = () => activeRequests.get(targetState) === requestId && targetState.isEvaluating
     targetState.isEvaluating = true
     targetState.result = null
     targetState.streamContent = ''
@@ -322,24 +318,30 @@ export function useEvaluation(
     }
 
     try {
-      await evaluationService.evaluateStream(request, {
+      const evaluationModelKey = await getModelKey(type)
+      if (!isCurrentRequest()) return
+      await evaluationService.evaluateStream({
+        ...request,
+        evaluationModelKey,
+      }, {
         onToken: (token: string) => {
-          if (!targetState.isEvaluating) return
+          if (!isCurrentRequest()) return
           targetState.streamContent += token
         },
         onComplete: (result: EvaluationResponse) => {
-          if (!targetState.isEvaluating) return
+          if (!isCurrentRequest()) return
           targetState.result = result
           targetState.isEvaluating = false
         },
         onError: (error: Error) => {
-          if (!targetState.isEvaluating) return
+          if (!isCurrentRequest()) return
           targetState.error = getI18nErrorMessage(error)
           targetState.isEvaluating = false
           toast.error(t('evaluation.error.failed', { error: targetState.error }))
         },
       })
     } catch (error) {
+      if (!isCurrentRequest()) return
       targetState.error = getI18nErrorMessage(error)
       targetState.isEvaluating = false
       toast.error(t('evaluation.error.failed', { error: targetState.error }))
@@ -352,7 +354,7 @@ export function useEvaluation(
       target: params.target,
       testCase: params.testCase,
       snapshot: params.snapshot,
-      evaluationModelKey: await getModelKey('result'),
+      evaluationModelKey: '', // 在 executeEvaluation 的错误处理范围内解析
       variables: { language: getLanguage() },
       mode: getModeConfig(),
       focus: params.focus?.trim()
@@ -383,7 +385,7 @@ export function useEvaluation(
       testCases: params.testCases,
       snapshots: params.snapshots,
       compareHints: params.compareHints,
-      evaluationModelKey: await getModelKey('compare'),
+      evaluationModelKey: '',
       variables: { language: getLanguage() },
       mode: getModeConfig(),
       focus: params.focus?.trim()
@@ -405,7 +407,7 @@ export function useEvaluation(
     const request: PromptOnlyEvaluationRequest = {
       type: 'prompt-only',
       target: params.target,
-      evaluationModelKey: await getModelKey('prompt-only'),
+      evaluationModelKey: '',
       variables: {
         ...(params.variables || {}),
         language: getLanguage(),
@@ -432,7 +434,7 @@ export function useEvaluation(
       type: 'prompt-iterate',
       target: params.target,
       iterateRequirement: params.iterateRequirement,
-      evaluationModelKey: await getModelKey('prompt-iterate'),
+      evaluationModelKey: '',
       variables: {
         ...(params.variables || {}),
         language: getLanguage(),
@@ -453,6 +455,7 @@ export function useEvaluation(
     const targetState = getTargetState(type, variantId)
     if (!targetState) return
 
+    activeRequests.delete(targetState)
     targetState.isEvaluating = false
     targetState.result = null
     targetState.streamContent = ''

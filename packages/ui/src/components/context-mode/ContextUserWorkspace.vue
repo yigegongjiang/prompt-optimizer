@@ -122,6 +122,13 @@
                             :getPrimary="OptionAccessors.getPrimary"
                             :getSecondary="OptionAccessors.getSecondary"
                             :getValue="OptionAccessors.getValue"
+                            :placeholder="t('model.select.placeholder')"
+                            size="medium"
+                            :disabled="contextUserOptimization.isOptimizing"
+                            filterable
+                            :show-config-action="true"
+                            :show-empty-config-c-t-a="true"
+                            @focus="modelSelection.refreshTextModels"
                             @config="handleOpenModelManager"
                         />
                     </template>
@@ -134,6 +141,13 @@
                             :getPrimary="OptionAccessors.getPrimary"
                             :getSecondary="OptionAccessors.getSecondary"
                             :getValue="OptionAccessors.getValue"
+                            :placeholder="t('template.select')"
+                            size="medium"
+                            :disabled="contextUserOptimization.isOptimizing"
+                            filterable
+                            :show-config-action="true"
+                            :show-empty-config-c-t-a="true"
+                            @focus="templateSelection.refreshOptimizeTemplates"
                             @config="handleOpenTemplateManager"
                         />
                     </template>
@@ -375,6 +389,13 @@
                                                 :getPrimary="OptionAccessors.getPrimary"
                                                 :getSecondary="OptionAccessors.getSecondary"
                                                 :getValue="OptionAccessors.getValue"
+                                                :placeholder="t('model.select.placeholder')"
+                                                size="medium"
+                                                :disabled="variantRunning[id] || isAnyVariantRunning"
+                                                filterable
+                                                :show-config-action="true"
+                                                :show-empty-config-c-t-a="true"
+                                                @focus="modelSelection.refreshTextModels"
                                                 @config="emit('config-model')"
                                                 style="min-width: 0; width: 100%;"
                                             />
@@ -956,7 +977,8 @@ const templateSelection = useWorkspaceTemplateSelection(
 // Variable value generation uses ContextUserTestPanel and requires a model key.
 // If the app-level evaluation model key isn't configured, fall back to the selected optimize model.
 const effectiveEvaluationModelKey = computed(() => {
-    return props.evaluationModelKey || modelSelection.selectedOptimizeModelKey.value || ''
+    return props.evaluationModelKey || modelSelection.selectedOptimizeModelKey.value ||
+        variantBModelKeyModel.value || variantAModelKeyModel.value || proVariableSession.selectedTestModelKey || ''
 })
 
 const patchSessionOptimizedResult = (

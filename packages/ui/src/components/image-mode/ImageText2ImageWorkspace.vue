@@ -672,6 +672,7 @@
                                                 filterable
                                                 :show-config-action="!!appOpenModelManager"
                                                 :show-empty-config-c-t-a="true"
+                                                @focus="refreshImageModels"
                                                 @config="() => appOpenModelManager && appOpenModelManager('image')"
                                                 style="min-width: 0; width: 100%;"
                                             />
@@ -1005,6 +1006,7 @@ import {
     type TestVariantId,
 } from '../../stores/session/useImageText2ImageSession'
 import { useImageGeneration } from '../../composables/image/useImageGeneration'
+import { useImageInputPreparation } from '../../composables/image/useImageInputPreparation'
 import {
     useReferenceImageActions,
     type ReferenceActionKind,
@@ -1046,6 +1048,7 @@ const router = useRouter()
 
 // Toast
 const toast = useToast();
+const { prepareInputRefs: prepareImageInputRefs } = useImageInputPreparation()
 const {
     tooltipThemeOverrides: referenceActionTooltipThemeOverrides,
     tooltipOverlayStyle: referenceActionTooltipOverlayStyle,
@@ -1136,6 +1139,7 @@ const {
     generateText2Image,
     validateText2ImageRequest,
     loadImageModels,
+    isImageModelListReady,
 } = useImageGeneration()
 
 // 服务引用
@@ -1515,8 +1519,8 @@ const versionOptions = computed(() => {
 watch(
     () => imageModelOptions.value,
     (opts) => {
+        if (!isImageModelListReady.value) return
         const fallback = opts?.[0]?.value || ''
-        if (!fallback) return
         const keys = new Set((opts || []).map((o) => o.value))
 
         const legacy = session.selectedImageModelKey
@@ -1749,12 +1753,7 @@ const evaluationHandler = useEvaluationHandler({
             return modelKey
         }
 
-        return (
-            functionModelManager.evaluationModel.value ||
-            selectedTextModelKey.value ||
-            functionModelManager.effectiveEvaluationModel.value ||
-            ''
-        )
+        return functionModelManager.resolveEvaluationModelKey(selectedTextModelKey.value)
     },
     functionMode: computed(() => 'image'),
     subMode: computed(() => 'text2image'),
@@ -2434,26 +2433,6 @@ const referenceActionStatusLabelKey = computed(() => {
     return ''
 })
 
-const readImageFileAsBase64 = (file: File): Promise<{ base64: string; mimeType: string }> =>
-    new Promise((resolve, reject) => {
-        const reader = new FileReader()
-
-        reader.onload = () => {
-            const dataUrl = reader.result as string
-            const base64 = dataUrl.split(',')[1]
-            resolve({
-                base64,
-                mimeType: file.type || 'image/png',
-            })
-        }
-
-        reader.onerror = () => {
-            reject(new Error(t('imageWorkspace.upload.readFailed')))
-        }
-
-        reader.readAsDataURL(file)
-    })
-
 const resolveReferenceActionMode = (
     actionKind: ReferenceActionKind,
 ): ReferenceApplicationMode => (actionKind === 'style-learn' ? 'migrate' : 'replicate')
@@ -2538,22 +2517,18 @@ const handleReferenceImageFileChange = async (event: Event) => {
         return
     }
 
-    if (!/image\/(png|jpeg)/.test(file.type)) {
-        toast.error(t('imageWorkspace.upload.fileTypeNotSupported'))
+    const preparedInputs = await prepareImageInputRefs([file])
+    if (!preparedInputs) {
         return
     }
-
-    if (file.size > 10 * 1024 * 1024) {
-        toast.error(t('imageWorkspace.upload.fileTooLarge'))
-        return
-    }
+    const preparedInput = preparedInputs[0]
 
     const nextActionKind = referenceAction.actionKind
     const previewToken = createReferenceActionPreviewToken()
     beginReferenceActionTask()
 
     try {
-        const { base64, mimeType } = await readImageFileAsBase64(file)
+        const { b64: base64, mimeType = 'image/png' } = preparedInput
         referenceAction.setSourceImagePreview(`data:${mimeType || 'image/png'};base64,${base64}`)
         referenceImagePayload.value = {
             base64,
@@ -2774,6 +2749,7 @@ const refreshImageModels = async () => {
         }))
 
         if (!imageModels.value.length) {
+            if (isImageModelListReady.value) selectedImageModelKey.value = ''
             return
         }
 

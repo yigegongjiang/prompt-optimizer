@@ -64,8 +64,15 @@
         </NButton>
       </template>
 
-      <div class="model-manager-content">
-        <NTabs v-model:value="activeTab" type="segment" size="small" animated class="model-manager-tabs">
+      <div class="model-manager-content" data-testid="model-manager-dialog">
+        <NTabs
+          v-model:value="activeTab"
+          data-testid="model-manager-tabs"
+          type="segment"
+          size="small"
+          animated
+          class="model-manager-tabs"
+        >
           <NTabPane name="text" :tab="t('modelManager.textModels')" />
           <NTabPane name="image" :tab="t('modelManager.imageModels')" />
           <NTabPane name="function" :tab="t('modelManager.functionModels')" />
@@ -166,10 +173,9 @@ const openAddForActiveTab = () => {
   }
 }
 
-const handleTextModelsUpdated = (id?: string) => {
-  if (id) {
-    emit('modelsUpdated', id)
-  }
+const handleTextModelsUpdated = async (id?: string) => {
+  emit('modelsUpdated', id)
+  await functionManagerRef.value?.refresh?.()
 }
 
 const handleAddImageModel = () => {

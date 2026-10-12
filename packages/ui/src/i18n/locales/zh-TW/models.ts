@@ -184,9 +184,14 @@ const messages = {
   },
   "functionModel": {
     "evaluationModel": "評估模型",
-    "evaluationModelHint": "用於智慧評估和變數提取，預設使用全域優化模型",
+    "evaluationModelPlaceholder": "預設：跟隨全域優化模型",
+    "evaluationModelUnavailable": "已設定的評估模型已停用或刪除，將按預設順序選擇可用模型。",
+    "saveFailed": "功能模型設定儲存失敗，請重試",
+    "loadFailed": "功能模型設定載入失敗，請重試",
+    "evaluationModelHint": "用於提示詞品質分析、結果評估及變數擷取與生成。單獨選擇後優先使用此模型；未設定時跟隨全域優化模型，沒有全域優化模型時再使用測試模型。",
     "imageRecognitionModel": "圖像識別模型",
     "imageRecognitionModelHint": "用於從圖片提取 JSON 提示詞和變數初始值，需單獨設定",
+    "imageRecognitionModelUnavailable": "已設定的圖片識別模型已停用或刪除，請啟用該模型或選擇其他模型。",
     "noImageRecognitionModel": "請先在功能模型中設定圖像識別模型",
     "unsupportedImageRecognitionModel": "目前圖像識別模型暫不支援圖片提取：{provider}"
   },

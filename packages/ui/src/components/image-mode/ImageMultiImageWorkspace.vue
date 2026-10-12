@@ -436,6 +436,7 @@
                         filterable
                         :show-config-action="!!appOpenModelManager"
                         :show-empty-config-c-t-a="true"
+                        @focus="refreshImageModelsHandler"
                         @config="() => appOpenModelManager && appOpenModelManager('image')"
                         style="min-width: 0; width: 100%;"
                       />
@@ -637,6 +638,7 @@ import {
 import type { AppServices } from '../../types/services'
 import { useImageMultiImageSession, type TestColumnCount, type TestPanelVersionValue, type TestVariantId } from '../../stores/session/useImageMultiImageSession'
 import { useImageGeneration } from '../../composables/image/useImageGeneration'
+import { useImageInputPreparation } from '../../composables/image/useImageInputPreparation'
 import { useTemporaryVariables } from '../../composables/variable/useTemporaryVariables'
 import { useTestVariableManager } from '../../composables/variable/useTestVariableManager'
 import { useVariableAwareInputBridge } from '../../composables/variable/useVariableAwareInputBridge'
@@ -684,11 +686,12 @@ import { EvaluationPanel } from '../evaluation'
 
 const { t } = useI18n()
 const toast = useToast()
+const { prepareInputRefs: prepareImageInputRefs } = useImageInputPreparation()
 const services = inject<Ref<AppServices | null>>('services', ref(null))
 const variableManager = inject<VariableManagerHooks | null>('variableManager', null)
 const session = useImageMultiImageSession()
 const tempVarsManager = useTemporaryVariables()
-const { imageModels, loadImageModels, generateMultiImage, validateMultiImageRequest } = useImageGeneration()
+const { imageModels, isImageModelListReady, loadImageModels, generateMultiImage, validateMultiImageRequest } = useImageGeneration()
 
 interface VariantInputImageInfo {
   width?: number
@@ -818,12 +821,7 @@ const evaluationHandler = useEvaluationHandler({
   evaluationModelKey: computed(() => selectedTextModelKey.value || ''),
   resolveEvaluationModelKey: async () => {
     await functionModelManager.initialize()
-    return (
-      functionModelManager.evaluationModel.value ||
-      selectedTextModelKey.value ||
-      functionModelManager.effectiveEvaluationModel.value ||
-      ''
-    )
+    return functionModelManager.resolveEvaluationModelKey(selectedTextModelKey.value)
   },
   functionMode: computed(() => 'image'),
   subMode: computed(() => 'multiimage'),
@@ -1188,14 +1186,13 @@ const versionOptions = computed(() =>
 watch(
   () => imageModelOptions.value,
   (options) => {
+    if (!isImageModelListReady.value) return
     const validKeys = new Set(options.map((item) => item.value))
     const seed = options.find((item) => item.supportsMultiImage)?.value || options[0]?.value || ''
-    if (seed) {
-      for (const id of ALL_VARIANT_IDS) {
-        const current = variantModelKeyModels[id].value
-        if (!current || !validKeys.has(current)) {
-          session.updateTestVariant(id, { modelKey: seed })
-        }
+    for (const id of ALL_VARIANT_IDS) {
+      const current = variantModelKeyModels[id].value
+      if (!current || !validKeys.has(current)) {
+        session.updateTestVariant(id, { modelKey: seed })
       }
     }
   },
@@ -1304,16 +1301,6 @@ const draggingImageIndex = ref<number | null>(null)
 const dragOverImageIndex = ref<number | null>(null)
 const dragOverUploadCard = ref(false)
 
-const fileToPayload = async (file: File): Promise<ImageInputRef> => {
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(reader.error || new Error('Failed to read image'))
-    reader.readAsDataURL(file)
-  })
-  return { b64: dataUrl.split(',', 2)[1] || '', mimeType: file.type || 'image/png' }
-}
-
 const triggerUpload = () => fileInputRef.value?.click()
 
 const handleFilesSelected = async (event: Event) => {
@@ -1321,7 +1308,8 @@ const handleFilesSelected = async (event: Event) => {
   const files = Array.from(input.files || [])
   if (files.length === 0) return
   try {
-    const payloads = await Promise.all(files.map(fileToPayload))
+    const payloads = await prepareImageInputRefs(files)
+    if (!payloads) return
     for (const payload of payloads) {
       await session.addInputImage(payload)
     }

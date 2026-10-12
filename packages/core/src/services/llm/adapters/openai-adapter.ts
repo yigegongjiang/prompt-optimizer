@@ -27,23 +27,42 @@ interface ModelOverride {
  */
 const OPENAI_STATIC_MODELS: ModelOverride[] = [
   {
-    id: 'gpt-5-mini',
-    name: 'GPT-5 Mini',
-    description: 'Fast, capable, and efficient small model with significant improvements in instruction-following and coding',
+    id: 'gpt-5.6-terra',
+    name: 'GPT-5.6 Terra',
+    description: 'Balanced GPT-5.6 model for general-purpose work with strong reasoning and low latency',
     capabilities: {
       supportsTools: true,
-      supportsReasoning: false,
-      maxContextLength: 1047576
+      supportsReasoning: true,
+      maxContextLength: 1050000
+    },
+    defaultParameterValues: {
+      reasoning_effort: 'none'
     }
   },
   {
-    id: 'gpt-5.1',
-    name: 'GPT-5.1',
-    description: 'Latest GPT-5.1 flagship model with enhanced capabilities',
+    id: 'gpt-6-astra',
+    name: 'GPT-6 Astra',
+    description: 'Most capable OpenAI model for the hardest end-to-end work',
     capabilities: {
       supportsTools: true,
-      supportsReasoning: false,
-      maxContextLength: 1047576
+      supportsReasoning: true,
+      maxContextLength: 1050000
+    },
+    defaultParameterValues: {
+      reasoning_effort: 'low'
+    }
+  },
+  {
+    id: 'gpt-5.6-luna',
+    name: 'GPT-5.6 Luna',
+    description: 'Fast GPT-5.6 model for cost-sensitive, high-throughput workloads',
+    capabilities: {
+      supportsTools: true,
+      supportsReasoning: true,
+      maxContextLength: 1050000
+    },
+    defaultParameterValues: {
+      reasoning_effort: 'none'
     }
   }
 ]
@@ -175,8 +194,21 @@ export class OpenAIAdapter extends AbstractTextProviderAdapter {
    * 获取参数定义
    * 基于 OpenAI 官方文档: https://platform.openai.com/docs/api-reference/chat/create
    */
-  protected getParameterDefinitions(_modelId: string): readonly ParameterDefinition[] {
+  protected getParameterDefinitions(modelId: string): readonly ParameterDefinition[] {
+    const isAstra = modelId === 'gpt-6-astra'
     return [
+      {
+        name: 'reasoning_effort',
+        labelKey: 'params.reasoning_effort.label',
+        descriptionKey: 'params.reasoning_effort.description',
+        description: 'Reasoning effort for current OpenAI models.',
+        type: 'string',
+        defaultValue: isAstra ? 'low' : 'none',
+        default: isAstra ? 'low' : 'none',
+        allowedValues: isAstra
+          ? ['low', 'medium', 'high', 'xhigh', 'max']
+          : ['none', 'low', 'medium', 'high', 'xhigh', 'max']
+      },
       {
         name: 'temperature',
         labelKey: 'params.temperature.label',
@@ -411,6 +443,7 @@ export class OpenAIAdapter extends AbstractTextProviderAdapter {
       n: _n,
       seed: _seed,
       logprobs,
+      reasoning_effort,
       responseMimeType: _responseMimeType,
       ...restParams
     } = (paramOverrides || {}) as Record<string, unknown>
@@ -425,6 +458,14 @@ export class OpenAIAdapter extends AbstractTextProviderAdapter {
 
     if (logprobs === true && normalizedParams.include === undefined) {
       normalizedParams.include = ['message.output_text.logprobs']
+    }
+
+    if (reasoning_effort !== undefined) {
+      const existingReasoning = normalizedParams.reasoning
+      normalizedParams.reasoning = {
+        ...(existingReasoning && typeof existingReasoning === 'object' ? existingReasoning : {}),
+        effort: reasoning_effort
+      }
     }
 
     return normalizedParams

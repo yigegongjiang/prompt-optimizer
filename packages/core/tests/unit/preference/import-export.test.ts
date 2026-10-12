@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { PreferenceService } from '../../../src/services/preference/service';
 import { MemoryStorageProvider } from '../../../src/services/storage/memoryStorageProvider';
+import { FUNCTION_MODEL_KEYS } from '../../../src/constants/storage-keys';
 
 describe('PreferenceService Import/Export', () => {
   let preferenceService: PreferenceService;
@@ -16,6 +17,17 @@ describe('PreferenceService Import/Export', () => {
   });
 
   describe('exportData', () => {
+    it('exports persisted UI settings after reopening without requiring earlier reads', async () => {
+      await preferenceService.set('app:settings:ui:theme-id', 'dark');
+      await preferenceService.set(FUNCTION_MODEL_KEYS.EVALUATION_MODEL, 'judge');
+      await preferenceService.set(FUNCTION_MODEL_KEYS.IMAGE_RECOGNITION_MODEL, 'vision');
+      const reopened = new PreferenceService(storageProvider);
+      expect(await reopened.exportData()).toEqual({
+        'app:settings:ui:theme-id': 'dark',
+        [FUNCTION_MODEL_KEYS.EVALUATION_MODEL]: 'judge',
+        [FUNCTION_MODEL_KEYS.IMAGE_RECOGNITION_MODEL]: 'vision',
+      });
+    });
     it('should export all preferences', async () => {
       // 设置一些偏好设置
       await preferenceService.set('app:settings:ui:theme-id', 'dark');
@@ -48,6 +60,18 @@ describe('PreferenceService Import/Export', () => {
   });
 
   describe('importData', () => {
+    it('restores function model settings from exported backups, including automatic evaluation selection', async () => {
+      await preferenceService.set(FUNCTION_MODEL_KEYS.EVALUATION_MODEL, 'custom-evaluation');
+      await preferenceService.set(FUNCTION_MODEL_KEYS.IMAGE_RECOGNITION_MODEL, 'vision-model');
+      const destination = new PreferenceService(new MemoryStorageProvider());
+      await destination.importData(await preferenceService.exportData());
+      expect(await destination.get(FUNCTION_MODEL_KEYS.EVALUATION_MODEL, '')).toBe('custom-evaluation');
+      expect(await destination.get(FUNCTION_MODEL_KEYS.IMAGE_RECOGNITION_MODEL, '')).toBe('vision-model');
+
+      await preferenceService.set(FUNCTION_MODEL_KEYS.EVALUATION_MODEL, '');
+      await destination.importData(await preferenceService.exportData());
+      expect(await destination.get(FUNCTION_MODEL_KEYS.EVALUATION_MODEL, 'missing')).toBe('');
+    });
     it('should import valid preferences', async () => {
       const importData = {
         'app:settings:ui:theme-id': 'light',

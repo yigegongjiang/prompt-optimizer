@@ -34,15 +34,15 @@ describe('OpenAIImageAdapter', () => {
   })
 
   describe('Static Models', () => {
-    test('should return GPT Image 2 as the static default model', () => {
+    test('should return GPT Image 2.5 Flare as the static default model', () => {
       const models = adapter.getModels()
 
       expect(Array.isArray(models)).toBe(true)
-      expect(models.map(model => model.id)).toEqual(['gpt-image-2'])
+      expect(models.map(model => model.id)).toEqual(['gpt-image-2.5-flare'])
 
       const imageModel = models[0]
       expect(imageModel).toMatchObject({
-        id: 'gpt-image-2',
+        id: 'gpt-image-2.5-flare',
         name: expect.any(String),
         providerId: 'openai',
         capabilities: {
@@ -54,20 +54,32 @@ describe('OpenAIImageAdapter', () => {
       })
     })
 
-    test('should include quality and size parameters', () => {
+    test('should expose supported GPT Image 2.5 parameters', () => {
       const models = adapter.getModels()
-      const model = models.find(m => m.id === 'gpt-image-2')
+      const model = models.find(m => m.id === 'gpt-image-2.5-flare')
 
       expect(model?.parameterDefinitions).toBeDefined()
       const qualityParam = model?.parameterDefinitions?.find(p => p.name === 'quality')
       const sizeParam = model?.parameterDefinitions?.find(p => p.name === 'size')
+      const backgroundParam = model?.parameterDefinitions?.find(p => p.name === 'background')
 
       expect(qualityParam).toBeDefined()
       expect(qualityParam?.type).toBe('string')
-      expect(qualityParam?.allowedValues).toEqual(expect.arrayContaining(['auto', 'high', 'medium', 'low']))
+      expect(qualityParam?.allowedValues).toEqual(['auto', 'max', 'xhigh', 'high', 'medium', 'low'])
 
       expect(sizeParam).toBeDefined()
-      expect(sizeParam?.allowedValues).toContain('1024x1024')
+      expect(sizeParam?.allowedValues).toEqual([
+        '1024x1024',
+        '1536x1024',
+        '1024x1536',
+        '2048x2048',
+        '2048x1152',
+        '3840x2160',
+        '2160x3840',
+        'auto'
+      ])
+
+      expect(backgroundParam?.allowedValues).toEqual(['auto', 'opaque'])
     })
   })
 
@@ -79,7 +91,7 @@ describe('OpenAIImageAdapter', () => {
           data: [
             { id: 'gpt-5.1' },
             { id: 'third-party-text-model', name: 'Text Model' },
-            { id: 'gpt-image-2', name: 'GPT Image 2' },
+            { id: 'gpt-image-2.5-flare', name: 'GPT Image 2.5 Flare' },
             { id: 'vendor/custom-image-fast', name: 'Custom Image Fast' }
           ]
         })
@@ -91,7 +103,7 @@ describe('OpenAIImageAdapter', () => {
       })
 
       expect(models.map(model => model.id)).toEqual([
-        'gpt-image-2',
+        'gpt-image-2.5-flare',
         'vendor/custom-image-fast',
         'gpt-5.1',
         'third-party-text-model'
@@ -108,7 +120,7 @@ describe('OpenAIImageAdapter', () => {
       )
     })
 
-    test('should fall back to static GPT Image 2 model when model fetch fails', async () => {
+    test('should fall back to static GPT Image 2.5 Flare model when model fetch fails', async () => {
       global.fetch = vi.fn().mockResolvedValue({
         ok: false,
         status: 503,
@@ -117,7 +129,7 @@ describe('OpenAIImageAdapter', () => {
 
       const models = await adapter.getModelsAsync({ apiKey: 'test-api-key' })
 
-      expect(models.map(model => model.id)).toEqual(['gpt-image-2'])
+      expect(models.map(model => model.id)).toEqual(['gpt-image-2.5-flare'])
     })
   })
 
@@ -136,7 +148,7 @@ describe('OpenAIImageAdapter', () => {
         },
         paramOverrides: {
           quality: 'standard',
-          size: '1024x1024'
+          size: '3840x2160'
         }
       }
 
@@ -173,6 +185,7 @@ describe('OpenAIImageAdapter', () => {
 
       const [, options] = (global.fetch as any).mock.calls[0]
       const body = JSON.parse(options.body)
+      expect(body.size).toBe('3840x2160')
       expect(body.response_format).toBeUndefined()
     })
 

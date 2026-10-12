@@ -127,12 +127,23 @@ describe('OpenAIAdapter', () => {
       expect(Array.isArray(models)).toBe(true);
       expect(models.length).toBeGreaterThan(0);
 
-      // 验证至少包含 GPT-5 Mini
-      const gpt5Mini = models.find(m => m.id === 'gpt-5-mini');
-      expect(gpt5Mini).toBeDefined();
-      expect(gpt5Mini?.name).toBe('GPT-5 Mini');
-      expect(gpt5Mini?.providerId).toBe('openai');
-      expect(gpt5Mini?.capabilities.supportsTools).toBe(true);
+      expect(models.map(model => model.id)).toEqual([
+        'gpt-5.6-terra',
+        'gpt-6-astra',
+        'gpt-5.6-luna'
+      ]);
+      const terra = models[0];
+      expect(terra.name).toBe('GPT-5.6 Terra');
+      expect(terra.providerId).toBe('openai');
+      expect(terra.capabilities.supportsTools).toBe(true);
+      expect(terra.capabilities.supportsReasoning).toBe(true);
+      expect(terra.capabilities.maxContextLength).toBe(1050000);
+
+      const astra = models[1];
+      expect(astra.name).toBe('GPT-6 Astra');
+      expect(astra.defaultParameterValues).toMatchObject({ reasoning_effort: 'low' });
+      expect(astra.parameterDefinitions.find(p => p.name === 'reasoning_effort')?.allowedValues)
+        .toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
     });
 
     it('should have capabilities for each model', () => {
@@ -167,6 +178,8 @@ describe('OpenAIAdapter', () => {
       const tempParam = model.parameterDefinitions.find(p => p.name === 'temperature');
       expect(tempParam).toBeDefined();
       expect(tempParam?.type).toBe('number');
+      expect(model.parameterDefinitions.find(p => p.name === 'reasoning_effort')?.allowedValues)
+        .toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
     });
   });
 
@@ -226,6 +239,9 @@ describe('OpenAIAdapter', () => {
         connectionConfig: {
           ...mockConfig.connectionConfig,
           requestStyle: 'responses'
+        },
+        paramOverrides: {
+          reasoning_effort: 'high'
         }
       };
 
@@ -240,7 +256,8 @@ describe('OpenAIAdapter', () => {
       expect(mockOpenAIInstance.responses.create).toHaveBeenCalledWith(
         expect.objectContaining({
           model: 'gpt-5-mini',
-          input: [{ role: 'user', content: 'Hello, world!' }]
+          input: [{ role: 'user', content: 'Hello, world!' }],
+          reasoning: { effort: 'high' }
         })
       );
       expect(mockOpenAIInstance.chat.completions.create).not.toHaveBeenCalled();

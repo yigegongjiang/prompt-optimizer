@@ -90,3 +90,30 @@ test('mcp-server bin points to a file that exists before build output is generat
     `Expected ${binTargetPath} to exist so pnpm can create the workspace bin shim during install`,
   )
 })
+
+test('desktop package includes every runtime window icon', () => {
+  const desktopPackage = readJson(path.join('packages', 'desktop', 'package.json'))
+  const packagedFiles = desktopPackage.build?.files ?? []
+
+  assert.ok(
+    packagedFiles.includes('icons/**/*'),
+    'Desktop build.files must include the icons directory used by main.js at runtime',
+  )
+
+  for (const iconName of ['app-icon.ico', 'app-icon.icns', 'app-icon.png']) {
+    const iconPath = path.join(process.cwd(), 'packages', 'desktop', 'icons', iconName)
+    assert.equal(fs.existsSync(iconPath), true, `Expected runtime icon ${iconPath} to exist`)
+  }
+})
+
+test('desktop package defines a path-safe executable name', () => {
+  const desktopPackage = readJson(path.join('packages', 'desktop', 'package.json'))
+  const executableName = desktopPackage.build?.executableName
+
+  assert.equal(executableName, 'PromptOptimizer')
+  assert.match(
+    executableName,
+    /^[A-Za-z0-9._() -]+$/,
+    'Desktop executableName must remain safe for Linux AppImage file paths',
+  )
+})
